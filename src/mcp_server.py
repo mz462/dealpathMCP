@@ -20,6 +20,9 @@ from .dealpath_client import DealpathClient
 
 load_dotenv()
 
+# Record start time for uptime calculations
+START_TIME = datetime.utcnow()
+
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Dealpath MCP Server (Streamable HTTP)")
@@ -184,10 +187,14 @@ def mcp_response_ok(req_id: Any, result: Any) -> Json:
 
 
 def mcp_response_error(req_id: Any, code: int, message: str, data: Any = None) -> Json:
+    """Build a JSON-RPC error response consistently.
+
+    Always returns an error envelope; includes optional data when provided.
+    """
     err: Json = {"code": code, "message": message}
     if data is not None:
         err["data"] = data
-        return {"jsonrpc": "2.0", "id": req_id, "error": err}
+    return {"jsonrpc": "2.0", "id": req_id, "error": err}
 
 
 def build_tools_list() -> dict[str, Any]:
@@ -1898,9 +1905,7 @@ def liveness_check():
     return {
         "status": "alive",
         "timestamp": datetime.utcnow().isoformat(),
-        "uptime_seconds": (
-            datetime.utcnow() - datetime.utcnow()
-        ).total_seconds(),  # simplified
+        "uptime_seconds": (datetime.utcnow() - START_TIME).total_seconds(),
     }
 
 

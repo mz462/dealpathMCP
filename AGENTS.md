@@ -43,3 +43,37 @@
 - Start server: `uvicorn src.main:app --host 127.0.0.1 --port 8000`.
 - Configure Claude desktop `claude_desktop_config.json` to point MCP to `http://127.0.0.1:8000/mcp` via `mcp-remote`.
 - Restart Claude; available tools include `mcp__dealpath__get_deals`, `mcp__dealpath__get_file_by_id`, and executive analytics tools.
+
+## Potential Next Steps: MCP File Delivery Strategy
+
+Goal: minimize server-side file persistence; prefer secure, direct downloads.
+
+- Default behavior
+  - Prefer returning signed remote URLs as MCP `resource_link` parts.
+  - Avoid saving files locally unless explicitly enabled for dev/debug.
+
+- Configurability (env)
+  - `FILE_DOWNLOAD_STRATEGY` = `remote_only` | `proxy_stream` | `local_cache` (default: `remote_only`).
+  - `FILE_STORAGE_DIR` (existing): local cache root if `local_cache` is used.
+  - `FILE_CACHE_TTL_HOURS` (e.g., `72`), `FILE_CACHE_MAX_BYTES` (e.g., `1_000_000_000`), `FILE_CACHE_MAX_FILES`.
+
+- Security hardening
+  - Require bearer auth on `GET /local-files/*` when `mcp_token` is set.
+  - Send `X-Content-Type-Options: nosniff` and correct `Content-Type` when serving.
+  - Maintain strict path sanitization (already implemented) and never log sensitive paths/filenames.
+
+- Streaming alternative (no persistence)
+  - Add `GET /mcp/file/{file_id}` that fetches and streams bytes without writing to disk.
+  - Set `Content-Disposition` with the filename and `Content-Type` from upstream headers.
+
+- Retention & cleanup (if `local_cache`)
+  - Implement TTL-based cleanup job and an admin-only purge endpoint.
+  - Track and enforce `FILE_CACHE_MAX_BYTES`/`FILE_CACHE_MAX_FILES`.
+
+- Observability
+  - Expose metrics: cache hits/misses, bytes served, evictions, upstream failures.
+  - Add structured logs for file fetches (exclude secrets/URLs with tokens).
+
+- Documentation & tests
+  - Update README/API with strategy explanation, warnings for public exposure, and env var table.
+  - Add tests for: strategy modes, auth guard on `/local-files/*`, and streaming endpoint.

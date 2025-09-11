@@ -78,7 +78,7 @@ Response shape (abridged):
   "id": "3",
   "result": {
     "content": [
-      { "type": "json", "json": { "deals": { "data": [ ... ] } } }
+      { "type": "text", "text": "{\"deals\":{\"data\":[ ... ]}}" }
     ]
   }
 }
