@@ -166,7 +166,7 @@ def build_tools_list() -> dict[str, Any]:
             {
                 "name": "get_deals",
                 "title": "List Deals",
-                "description": "Retrieve deals from Dealpath with optional filters for status and property type. Returns paginated results with deal metadata.",
+                "description": "Retrieve deals from Dealpath with optional filters for status and property type. Includes local propertyType filtering when API-side filtering is unavailable. Returns paginated results with deal metadata.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -194,6 +194,10 @@ def build_tools_list() -> dict[str, Any]:
                             "minimum": 1,
                             "maximum": 100,
                             "default": 20,
+                        },
+                        "next_token": {
+                            "type": "string",
+                            "description": "Pagination token from previous response to fetch next page",
                         },
                     },
                     "additionalProperties": False,
@@ -667,12 +671,37 @@ def tool_call_dispatch(
     if name == "get_deals":
         status_val = arguments.get("status")
         property_type = arguments.get("propertyType")
+        next_token = arguments.get("next_token")
+        limit = arguments.get("limit")
         filters = {}
         if status_val:
             filters["status"] = status_val
+        if next_token:
+            filters["next_token"] = next_token
+        if limit is not None:
+            filters["limit"] = limit
+
+        result = client.get_deals(**filters)
+
+        # If a propertyType filter is provided, apply a safe local filter on the
+        # returned payload (deal.deal_type) to ensure the behavior users expect.
         if property_type:
-            filters["propertyType"] = property_type
-        return client.get_deals(**filters)
+            try:
+                deals_container = result.get("deals") or {}
+                data = deals_container.get("data") or []
+                filtered = [
+                    d for d in data if str(d.get("deal_type")) == str(property_type)
+                ]
+                # Replace data with filtered list; keep other keys intact
+                deals_container = dict(deals_container)
+                deals_container["data"] = filtered
+                # Do not modify next_token since we're client-side filtering
+                result = dict(result)
+                result["deals"] = deals_container
+            except Exception:
+                # If structure unexpected, return original result unmodified
+                pass
+        return result
 
     if name == "get_deal":
         deal_id = arguments.get("deal_id")
