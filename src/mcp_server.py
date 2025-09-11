@@ -148,6 +148,37 @@ app.add_middleware(
 Json = dict[str, Any]
 
 
+def _thin_fields_container(
+    container: dict[str, Any],
+    *,
+    non_null: bool = False,
+    limit: Optional[int] = None,
+    names_only: bool = False,
+    name_contains: Optional[list[str]] = None,
+) -> dict[str, Any]:
+    data = list(container.get("data", []))
+    if non_null:
+        data = [item for item in data if item.get("value") not in (None, "", [])]
+    if name_contains:
+        needles = [s.lower() for s in name_contains if isinstance(s, str) and s]
+        if needles:
+            data = [
+                item
+                for item in data
+                if any(n in str(item.get("name", "")).lower() for n in needles)
+            ]
+    if limit is not None:
+        try:
+            lim = int(limit)
+            if lim > 0:
+                data = data[:lim]
+        except Exception:
+            pass
+    if names_only:
+        data = [{"name": item.get("name"), "value": item.get("value")} for item in data]
+    return {"data": data, "next_token": container.get("next_token")}
+
+
 def mcp_response_ok(req_id: Any, result: Any) -> Json:
     return {"jsonrpc": "2.0", "id": req_id, "result": result}
 
@@ -242,6 +273,27 @@ def build_tools_list() -> dict[str, Any]:
                             "description": "If true, auto-page through all results and return a single combined list",
                             "default": False,
                         },
+                        "non_null": {
+                            "type": "boolean",
+                            "description": "Only include fields with non-null values",
+                            "default": False,
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "Limit number of items returned (applied after filters)",
+                            "minimum": 1,
+                            "maximum": 1000,
+                        },
+                        "names_only": {
+                            "type": "boolean",
+                            "description": "Return compact items as {name,value} only",
+                            "default": False,
+                        },
+                        "name_contains": {
+                            "type": "array",
+                            "description": "Only include items where name contains any of these substrings (case-insensitive)",
+                            "items": {"type": "string", "minLength": 1},
+                        },
                     },
                     "additionalProperties": False,
                 },
@@ -268,6 +320,10 @@ def build_tools_list() -> dict[str, Any]:
                             "description": "If true, auto-page through all results",
                             "default": False,
                         },
+                        "non_null": {"type": "boolean", "default": False},
+                        "limit": {"type": "integer", "minimum": 1, "maximum": 1000},
+                        "names_only": {"type": "boolean", "default": False},
+                        "name_contains": {"type": "array", "items": {"type": "string", "minLength": 1}},
                     },
                     "additionalProperties": False,
                 },
@@ -294,6 +350,10 @@ def build_tools_list() -> dict[str, Any]:
                             "description": "If true, auto-page through all results",
                             "default": False,
                         },
+                        "non_null": {"type": "boolean", "default": False},
+                        "limit": {"type": "integer", "minimum": 1, "maximum": 1000},
+                        "names_only": {"type": "boolean", "default": False},
+                        "name_contains": {"type": "array", "items": {"type": "string", "minLength": 1}},
                     },
                     "additionalProperties": False,
                 },
@@ -320,6 +380,10 @@ def build_tools_list() -> dict[str, Any]:
                             "description": "If true, auto-page through all results",
                             "default": False,
                         },
+                        "non_null": {"type": "boolean", "default": False},
+                        "limit": {"type": "integer", "minimum": 1, "maximum": 1000},
+                        "names_only": {"type": "boolean", "default": False},
+                        "name_contains": {"type": "array", "items": {"type": "string", "minLength": 1}},
                     },
                     "additionalProperties": False,
                 },
@@ -346,6 +410,10 @@ def build_tools_list() -> dict[str, Any]:
                             "description": "If true, auto-page through all results",
                             "default": False,
                         },
+                        "non_null": {"type": "boolean", "default": False},
+                        "limit": {"type": "integer", "minimum": 1, "maximum": 1000},
+                        "names_only": {"type": "boolean", "default": False},
+                        "name_contains": {"type": "array", "items": {"type": "string", "minLength": 1}},
                     },
                     "additionalProperties": False,
                 },
@@ -372,6 +440,10 @@ def build_tools_list() -> dict[str, Any]:
                             "description": "If true, auto-page through all results",
                             "default": False,
                         },
+                        "non_null": {"type": "boolean", "default": False},
+                        "limit": {"type": "integer", "minimum": 1, "maximum": 1000},
+                        "names_only": {"type": "boolean", "default": False},
+                        "name_contains": {"type": "array", "items": {"type": "string", "minLength": 1}},
                     },
                     "additionalProperties": False,
                 },
@@ -786,8 +858,26 @@ def tool_call_dispatch(
                 token = fields_container.get("next_token")
                 if not token:
                     break
-            return {"fields": {"data": all_data, "next_token": None}}
-        return client.get_fields_by_deal_id(deal_id, **params)
+            container = {"data": all_data, "next_token": None}
+            thinned = _thin_fields_container(
+                container,
+                non_null=bool(arguments.get("non_null")),
+                limit=arguments.get("limit"),
+                names_only=bool(arguments.get("names_only")),
+                name_contains=arguments.get("name_contains"),
+            )
+            return {"fields": thinned}
+        page = client.get_fields_by_deal_id(deal_id, **params)
+        if any(k in arguments for k in ("non_null", "limit", "names_only", "name_contains")):
+            thinned = _thin_fields_container(
+                page.get("fields", {}),
+                non_null=bool(arguments.get("non_null")),
+                limit=arguments.get("limit"),
+                names_only=bool(arguments.get("names_only")),
+                name_contains=arguments.get("name_contains"),
+            )
+            return {"fields": thinned}
+        return page
 
     if name == "get_fields_by_investment_id":
         investment_id = arguments.get("investment_id")
@@ -806,8 +896,26 @@ def tool_call_dispatch(
                 token = fields_container.get("next_token")
                 if not token:
                     break
-            return {"fields": {"data": all_data, "next_token": None}}
-        return client.get_fields_by_investment_id(investment_id, **params)
+            container = {"data": all_data, "next_token": None}
+            thinned = _thin_fields_container(
+                container,
+                non_null=bool(arguments.get("non_null")),
+                limit=arguments.get("limit"),
+                names_only=bool(arguments.get("names_only")),
+                name_contains=arguments.get("name_contains"),
+            )
+            return {"fields": thinned}
+        page = client.get_fields_by_investment_id(investment_id, **params)
+        if any(k in arguments for k in ("non_null", "limit", "names_only", "name_contains")):
+            thinned = _thin_fields_container(
+                page.get("fields", {}),
+                non_null=bool(arguments.get("non_null")),
+                limit=arguments.get("limit"),
+                names_only=bool(arguments.get("names_only")),
+                name_contains=arguments.get("name_contains"),
+            )
+            return {"fields": thinned}
+        return page
 
     if name == "get_fields_by_property_id":
         property_id = arguments.get("property_id")
@@ -826,8 +934,26 @@ def tool_call_dispatch(
                 token = fields_container.get("next_token")
                 if not token:
                     break
-            return {"fields": {"data": all_data, "next_token": None}}
-        return client.get_fields_by_property_id(property_id, **params)
+            container = {"data": all_data, "next_token": None}
+            thinned = _thin_fields_container(
+                container,
+                non_null=bool(arguments.get("non_null")),
+                limit=arguments.get("limit"),
+                names_only=bool(arguments.get("names_only")),
+                name_contains=arguments.get("name_contains"),
+            )
+            return {"fields": thinned}
+        page = client.get_fields_by_property_id(property_id, **params)
+        if any(k in arguments for k in ("non_null", "limit", "names_only", "name_contains")):
+            thinned = _thin_fields_container(
+                page.get("fields", {}),
+                non_null=bool(arguments.get("non_null")),
+                limit=arguments.get("limit"),
+                names_only=bool(arguments.get("names_only")),
+                name_contains=arguments.get("name_contains"),
+            )
+            return {"fields": thinned}
+        return page
 
     if name == "get_fields_by_asset_id":
         asset_id = arguments.get("asset_id")
@@ -846,8 +972,26 @@ def tool_call_dispatch(
                 token = fields_container.get("next_token")
                 if not token:
                     break
-            return {"fields": {"data": all_data, "next_token": None}}
-        return client.get_fields_by_asset_id(asset_id, **params)
+            container = {"data": all_data, "next_token": None}
+            thinned = _thin_fields_container(
+                container,
+                non_null=bool(arguments.get("non_null")),
+                limit=arguments.get("limit"),
+                names_only=bool(arguments.get("names_only")),
+                name_contains=arguments.get("name_contains"),
+            )
+            return {"fields": thinned}
+        page = client.get_fields_by_asset_id(asset_id, **params)
+        if any(k in arguments for k in ("non_null", "limit", "names_only", "name_contains")):
+            thinned = _thin_fields_container(
+                page.get("fields", {}),
+                non_null=bool(arguments.get("non_null")),
+                limit=arguments.get("limit"),
+                names_only=bool(arguments.get("names_only")),
+                name_contains=arguments.get("name_contains"),
+            )
+            return {"fields": thinned}
+        return page
 
     if name == "get_fields_by_loan_id":
         loan_id = arguments.get("loan_id")
@@ -866,8 +1010,26 @@ def tool_call_dispatch(
                 token = fields_container.get("next_token")
                 if not token:
                     break
-            return {"fields": {"data": all_data, "next_token": None}}
-        return client.get_fields_by_loan_id(loan_id, **params)
+            container = {"data": all_data, "next_token": None}
+            thinned = _thin_fields_container(
+                container,
+                non_null=bool(arguments.get("non_null")),
+                limit=arguments.get("limit"),
+                names_only=bool(arguments.get("names_only")),
+                name_contains=arguments.get("name_contains"),
+            )
+            return {"fields": thinned}
+        page = client.get_fields_by_loan_id(loan_id, **params)
+        if any(k in arguments for k in ("non_null", "limit", "names_only", "name_contains")):
+            thinned = _thin_fields_container(
+                page.get("fields", {}),
+                non_null=bool(arguments.get("non_null")),
+                limit=arguments.get("limit"),
+                names_only=bool(arguments.get("names_only")),
+                name_contains=arguments.get("name_contains"),
+            )
+            return {"fields": thinned}
+        return page
 
     if name == "get_fields_by_field_definition_id":
         field_definition_id = arguments.get("field_definition_id")
@@ -888,8 +1050,26 @@ def tool_call_dispatch(
                 token = fields_container.get("next_token")
                 if not token:
                     break
-            return {"fields": {"data": all_data, "next_token": None}}
-        return client.get_fields_by_field_definition_id(field_definition_id, **params)
+            container = {"data": all_data, "next_token": None}
+            thinned = _thin_fields_container(
+                container,
+                non_null=bool(arguments.get("non_null")),
+                limit=arguments.get("limit"),
+                names_only=bool(arguments.get("names_only")),
+                name_contains=arguments.get("name_contains"),
+            )
+            return {"fields": thinned}
+        page = client.get_fields_by_field_definition_id(field_definition_id, **params)
+        if any(k in arguments for k in ("non_null", "limit", "names_only", "name_contains")):
+            thinned = _thin_fields_container(
+                page.get("fields", {}),
+                non_null=bool(arguments.get("non_null")),
+                limit=arguments.get("limit"),
+                names_only=bool(arguments.get("names_only")),
+                name_contains=arguments.get("name_contains"),
+            )
+            return {"fields": thinned}
+        return page
 
     if name == "get_file_tag_definitions":
         params = {}
