@@ -301,6 +301,27 @@ def build_tools_list() -> dict[str, Any]:
                 },
             },
             {
+                "name": "get_fields_by_loan_id",
+                "title": "Get Fields For Loan",
+                "description": "Returns custom fields for a given loan, with pagination via next_token. Response object has keys: fields.data (array) and fields.next_token (string or null).",
+                "inputSchema": {
+                    "type": "object",
+                    "required": ["loan_id"],
+                    "properties": {
+                        "loan_id": {
+                            "type": "string",
+                            "description": "Loan ID",
+                            "pattern": "^[0-9]+$",
+                        },
+                        "next_token": {
+                            "type": "string",
+                            "description": "Pagination token from previous response to fetch next page",
+                        },
+                    },
+                    "additionalProperties": False,
+                },
+            },
+            {
                 "name": "get_deal_files",
                 "title": "List Deal Files",
                 "description": "Retrieve files associated with a deal, with optional filtering by folder and tags.",
@@ -596,6 +617,15 @@ def tool_call_dispatch(
         if arguments.get("next_token"):
             params["next_token"] = arguments["next_token"]
         return client.get_fields_by_asset_id(asset_id, **params)
+
+    if name == "get_fields_by_loan_id":
+        loan_id = arguments.get("loan_id")
+        if not loan_id:
+            raise HTTPException(status_code=400, detail="loan_id is required")
+        params = {}
+        if arguments.get("next_token"):
+            params["next_token"] = arguments["next_token"]
+        return client.get_fields_by_loan_id(loan_id, **params)
 
     if name == "get_deal_files":
         deal_id = arguments.get("deal_id")
