@@ -27,7 +27,12 @@ class DealpathClient:
         return response.json()
 
     def get_deal_by_id(self, deal_id: str):
-        response = requests.get(f"{BASE_URL}/deals/{deal_id}", headers=self.headers)
+        """Fetch a single deal by ID.
+
+        API endpoint is singular: /deal/{deal_id}
+        Returns nested object: {"deal": {"data": {...}, "next_token": null}}
+        """
+        response = requests.get(f"{BASE_URL}/deal/{deal_id}", headers=self.headers)
         response.raise_for_status()
         return response.json()
 
