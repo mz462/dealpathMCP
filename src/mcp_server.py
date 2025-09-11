@@ -707,7 +707,17 @@ def tool_call_dispatch(
         deal_id = arguments.get("deal_id")
         if not deal_id:
             raise HTTPException(status_code=400, detail="deal_id is required")
-        return client.get_deal_by_id(deal_id)
+        try:
+            return client.get_deal_by_id(deal_id)
+        except requests.HTTPError as http_err:
+            resp = http_err.response
+            detail = {
+                "url": str(getattr(resp, "url", "")),
+                "status": getattr(resp, "status_code", 0),
+                "reason": getattr(resp, "reason", ""),
+                "body": resp.text[:500] if getattr(resp, "text", None) else None,
+            }
+            raise HTTPException(status_code=resp.status_code, detail=detail)
 
     if name == "get_fields_by_deal_id":
         deal_id = arguments.get("deal_id")

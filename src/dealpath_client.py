@@ -1,6 +1,7 @@
 import os
 import re
 from typing import Any
+import logging
 
 import requests
 from dotenv import load_dotenv
@@ -14,6 +15,7 @@ FILES_BASE_URL = "https://files.dealpath.com"
 
 class DealpathClient:
     def __init__(self):
+        self.log = logging.getLogger(__name__ + ".DealpathClient")
         self.headers = {
             "Authorization": f"Bearer {DEALPATH_API_KEY}",
             "Accept": "application/vnd.dealpath.api.v1+json",
@@ -32,7 +34,9 @@ class DealpathClient:
         API endpoint is singular: /deal/{deal_id}
         Returns nested object: {"deal": {"data": {...}, "next_token": null}}
         """
-        response = requests.get(f"{BASE_URL}/deal/{deal_id}", headers=self.headers)
+        url = f"{BASE_URL}/deal/{deal_id}"
+        self.log.info(f"GET {url}")
+        response = requests.get(url, headers=self.headers)
         response.raise_for_status()
         return response.json()
 
