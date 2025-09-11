@@ -358,6 +358,21 @@ def build_tools_list() -> dict[str, Any]:
                 },
             },
             {
+                "name": "get_investments",
+                "title": "List Investments",
+                "description": "Returns a paginated list of investments. Response object has keys: investments.data (array) and investments.next_token (string or null).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "next_token": {
+                            "type": "string",
+                            "description": "Pagination token to fetch next page",
+                        }
+                    },
+                    "additionalProperties": False,
+                },
+            },
+            {
                 "name": "get_deal_files",
                 "title": "List Deal Files",
                 "description": "Retrieve files associated with a deal, with optional filtering by folder and tags.",
@@ -679,6 +694,12 @@ def tool_call_dispatch(
         if arguments.get("next_token"):
             params["next_token"] = arguments["next_token"]
         return client.get_file_tag_definitions(**params)
+
+    if name == "get_investments":
+        params = {}
+        if arguments.get("next_token"):
+            params["next_token"] = arguments["next_token"]
+        return client.get_investments(**params)
 
     if name == "get_deal_files":
         deal_id = arguments.get("deal_id")
