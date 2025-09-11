@@ -388,6 +388,21 @@ def build_tools_list() -> dict[str, Any]:
                 },
             },
             {
+                "name": "get_people",
+                "title": "List People",
+                "description": "Returns a paginated list of people. Response has people.data (array) and people.next_token (string or null).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "next_token": {
+                            "type": "string",
+                            "description": "Pagination token to fetch next page",
+                        }
+                    },
+                    "additionalProperties": False,
+                },
+            },
+            {
                 "name": "get_list_options_by_field_definition_id",
                 "title": "List Options For Field Definition",
                 "description": "Get all options for a list field definition. Useful to look up IDs (e.g., Deal Type IDs) for create requests.",
@@ -738,6 +753,12 @@ def tool_call_dispatch(
         if arguments.get("next_token"):
             params["next_token"] = arguments["next_token"]
         return client.get_loans(**params)
+
+    if name == "get_people":
+        params = {}
+        if arguments.get("next_token"):
+            params["next_token"] = arguments["next_token"]
+        return client.get_people(**params)
 
     if name == "get_list_options_by_field_definition_id":
         field_definition_id = arguments.get("field_definition_id")
