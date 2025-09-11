@@ -373,6 +373,23 @@ def build_tools_list() -> dict[str, Any]:
                 },
             },
             {
+                "name": "get_list_options_by_field_definition_id",
+                "title": "List Options For Field Definition",
+                "description": "Get all options for a list field definition. Useful to look up IDs (e.g., Deal Type IDs) for create requests.",
+                "inputSchema": {
+                    "type": "object",
+                    "required": ["field_definition_id"],
+                    "properties": {
+                        "field_definition_id": {
+                            "type": "string",
+                            "description": "Field Definition ID",
+                            "pattern": "^[0-9]+$",
+                        }
+                    },
+                    "additionalProperties": False,
+                },
+            },
+            {
                 "name": "get_deal_files",
                 "title": "List Deal Files",
                 "description": "Retrieve files associated with a deal, with optional filtering by folder and tags.",
@@ -700,6 +717,12 @@ def tool_call_dispatch(
         if arguments.get("next_token"):
             params["next_token"] = arguments["next_token"]
         return client.get_investments(**params)
+
+    if name == "get_list_options_by_field_definition_id":
+        field_definition_id = arguments.get("field_definition_id")
+        if not field_definition_id:
+            raise HTTPException(status_code=400, detail="field_definition_id is required")
+        return client.get_list_options_by_field_definition_id(field_definition_id)
 
     if name == "get_deal_files":
         deal_id = arguments.get("deal_id")
