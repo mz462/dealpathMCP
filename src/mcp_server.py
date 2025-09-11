@@ -156,7 +156,7 @@ def mcp_response_error(req_id: Any, code: int, message: str, data: Any = None) -
     err: Json = {"code": code, "message": message}
     if data is not None:
         err["data"] = data
-    return {"jsonrpc": "2.0", "id": req_id, "error": err}
+        return {"jsonrpc": "2.0", "id": req_id, "error": err}
 
 
 def build_tools_list() -> dict[str, Any]:
@@ -212,6 +212,27 @@ def build_tools_list() -> dict[str, Any]:
                             "description": "Unique identifier for the deal",
                             "pattern": "^[0-9]+$",
                         }
+                    },
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "name": "get_fields_by_deal_id",
+                "title": "Get Fields For Deal",
+                "description": "Returns custom fields for a given deal, with pagination via next_token. Response object has keys: fields.data (array) and fields.next_token (string or null).",
+                "inputSchema": {
+                    "type": "object",
+                    "required": ["deal_id"],
+                    "properties": {
+                        "deal_id": {
+                            "type": "string",
+                            "description": "Deal ID",
+                            "pattern": "^[0-9]+$",
+                        },
+                        "next_token": {
+                            "type": "string",
+                            "description": "Pagination token from previous response to fetch next page",
+                        },
                     },
                     "additionalProperties": False,
                 },
@@ -476,6 +497,15 @@ def tool_call_dispatch(
         if not deal_id:
             raise HTTPException(status_code=400, detail="deal_id is required")
         return client.get_deal_by_id(deal_id)
+
+    if name == "get_fields_by_deal_id":
+        deal_id = arguments.get("deal_id")
+        if not deal_id:
+            raise HTTPException(status_code=400, detail="deal_id is required")
+        params = {}
+        if arguments.get("next_token"):
+            params["next_token"] = arguments["next_token"]
+        return client.get_fields_by_deal_id(deal_id, **params)
 
     if name == "get_deal_files":
         deal_id = arguments.get("deal_id")
