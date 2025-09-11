@@ -840,7 +840,22 @@ def tool_call_dispatch(
                     )
                     return {"__content__": parts}
                 except Exception:
-                    # If local save fails, still return the remote link (as last part)
+                    # If local save fails (e.g., no network or no disk access), still
+                    # provide a stable local-style link alongside the remote link so
+                    # clients can present both. We won't persist bytes in this path.
+                    rel = _build_local_relpath(file_id, filename)
+                    local_uri = _absolute_local_url(
+                        base_url or "http://127.0.0.1:8000", rel
+                    )
+                    summary = (
+                        f"Links for file '{filename}' (id {file_id}):\n"
+                        f"- Local (not persisted): {local_uri}\n"
+                        f"- Remote (expires): {url}"
+                    )
+                    parts.append({"type": "text", "text": summary})
+                    parts.append(
+                        {"type": "resource_link", "name": filename, "uri": local_uri}
+                    )
                     parts.append(
                         {"type": "resource_link", "name": filename, "uri": url}
                     )
