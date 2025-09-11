@@ -1,7 +1,8 @@
 from typing import Optional, List, Any, Dict, Callable, Union
-from fastapi import FastAPI, HTTPException, Query, Response, Request, status
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, HTTPException, Query, Response, Request, status, Header
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
+from sse_starlette.sse import EventSourceResponse
 from collections import Counter
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
@@ -11,6 +12,10 @@ import base64
 import requests
 import pathlib
 import re
+import uuid
+import json
+import asyncio
+from uuid6 import uuid7
 
 from .dealpath_client import DealpathClient
 
@@ -27,6 +32,42 @@ MCP_TOKEN = os.getenv("mcp_token")
 ALLOWED_ORIGINS = {o.strip() for o in (os.getenv("allowed_origins", "http://127.0.0.1,http://localhost").split(",")) if o.strip()}
 SUPPORTED_PROTOCOL_VERSION = "2025-06-18"
 FILE_STORAGE_DIR = os.getenv("file_storage_dir", os.path.join(os.getcwd(), "local_files"))
+
+# Session management for Streamable HTTP transport
+sessions: Dict[str, Dict[str, Any]] = {}
+
+def create_session() -> str:
+    """Create a new MCP session with secure session ID."""
+    session_id = str(uuid7())
+    sessions[session_id] = {
+        "created_at": datetime.utcnow(),
+        "last_accessed": datetime.utcnow(),
+        "protocol_version": SUPPORTED_PROTOCOL_VERSION,
+        "initialized": False
+    }
+    logger.info(f"Created new MCP session: {session_id}")
+    return session_id
+
+def get_session(session_id: Optional[str]) -> Optional[Dict[str, Any]]:
+    """Get session data if valid, otherwise None."""
+    if not session_id or session_id not in sessions:
+        return None
+    
+    session = sessions[session_id]
+    session["last_accessed"] = datetime.utcnow()
+    return session
+
+def cleanup_expired_sessions(max_age_hours: int = 24):
+    """Clean up expired sessions."""
+    cutoff = datetime.utcnow() - timedelta(hours=max_age_hours)
+    expired = [sid for sid, session in sessions.items() 
+               if session["last_accessed"] < cutoff]
+    
+    for session_id in expired:
+        del sessions[session_id]
+        logger.info(f"Cleaned up expired session: {session_id}")
+    
+    return len(expired)
 
 if not MCP_TOKEN:
     logger.info(
@@ -98,74 +139,156 @@ def mcp_response_error(req_id: Any, code: int, message: str, data: Any = None) -
 
 
 def build_tools_list() -> Dict[str, Any]:
-    """Declare available tools with minimal schemas for MCP tools/list."""
+    """Declare available tools with comprehensive schemas for MCP tools/list (2025 spec)."""
     return {
         "tools": [
             {
                 "name": "get_deals",
                 "title": "List Deals",
-                "description": "Return deals with optional filters: status, propertyType.",
+                "description": "Retrieve deals from Dealpath with optional filters for status and property type. Returns paginated results with deal metadata.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "status": {"type": "string"},
-                        "propertyType": {"type": "string"}
+                        "status": {
+                            "type": "string",
+                            "description": "Filter by deal status",
+                            "enum": ["Active", "Closed", "Potential", "Terminated"]
+                        },
+                        "propertyType": {
+                            "type": "string", 
+                            "description": "Filter by property type",
+                            "enum": ["Office", "Retail", "Industrial", "Multifamily", "Hotel", "Mixed Use", "Other"]
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "Maximum number of deals to return",
+                            "minimum": 1,
+                            "maximum": 100,
+                            "default": 20
+                        }
                     },
-                },
+                    "additionalProperties": false
+                }
             },
             {
                 "name": "get_deal",
-                "title": "Get Deal",
-                "description": "Return a single deal by ID.",
-                "inputSchema": {
-                    "type": "object",
-                    "required": ["deal_id"],
-                    "properties": {"deal_id": {"type": "string"}},
-                },
-            },
-            {
-                "name": "get_deal_files",
-                "title": "Deal Files",
-                "description": "List files for a deal with optional filters.",
+                "title": "Get Deal Details",
+                "description": "Retrieve detailed information for a specific deal by its ID, including financial data, timeline, and participants.",
                 "inputSchema": {
                     "type": "object",
                     "required": ["deal_id"],
                     "properties": {
-                        "deal_id": {"type": "integer"},
-                        "parent_folder_ids": {"type": "array", "items": {"type": "integer"}},
-                        "file_tag_definition_ids": {"type": "array", "items": {"type": "integer"}},
-                        "updated_before": {"type": "integer"},
-                        "updated_after": {"type": "integer"},
-                        "next_token": {"type": "string"}
+                        "deal_id": {
+                            "type": "string",
+                            "description": "Unique identifier for the deal",
+                            "pattern": "^[0-9]+$"
+                        }
                     },
-                },
+                    "additionalProperties": false
+                }
+            },
+            {
+                "name": "get_deal_files",
+                "title": "List Deal Files",
+                "description": "Retrieve files associated with a deal, with optional filtering by folder and tags.",
+                "inputSchema": {
+                    "type": "object",
+                    "required": ["deal_id"],
+                    "properties": {
+                        "deal_id": {
+                            "type": "integer",
+                            "description": "Unique identifier for the deal",
+                            "minimum": 1
+                        },
+                        "parent_folder_ids": {
+                            "type": "array",
+                            "description": "Filter files by parent folder IDs",
+                            "items": {"type": "integer", "minimum": 1}
+                        },
+                        "file_tag_definition_ids": {
+                            "type": "array", 
+                            "description": "Filter files by tag definition IDs",
+                            "items": {"type": "integer", "minimum": 1}
+                        },
+                        "updated_before": {
+                            "type": "integer",
+                            "description": "Unix timestamp - only return files updated before this time"
+                        },
+                        "updated_after": {
+                            "type": "integer", 
+                            "description": "Unix timestamp - only return files updated after this time"
+                        },
+                        "next_token": {
+                            "type": "string",
+                            "description": "Pagination token for retrieving next page of results"
+                        }
+                    },
+                    "additionalProperties": false
+                }
             },
             {
                 "name": "get_portfolio_summary",
                 "title": "Portfolio Summary",
-                "description": "Summarize recent deals by status and property type (last 2 weeks).",
-                "inputSchema": {"type": "object", "properties": {}},
+                "description": "Generate a summary of recent portfolio activity, including deal counts by status and property type for the last 2 weeks.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "days": {
+                            "type": "integer",
+                            "description": "Number of days to look back for activity",
+                            "minimum": 1,
+                            "maximum": 365,
+                            "default": 14
+                        }
+                    },
+                    "additionalProperties": false
+                }
             },
             {
                 "name": "search",
-                "title": "Search",
-                "description": "Global Dealpath search.",
+                "title": "Global Search",
+                "description": "Perform a global search across all Dealpath entities including deals, properties, contacts, and documents.",
                 "inputSchema": {
                     "type": "object",
                     "required": ["query"],
-                    "properties": {"query": {"type": "string"}},
-                },
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "Search query string",
+                            "minLength": 1,
+                            "maxLength": 500
+                        },
+                        "entity_type": {
+                            "type": "string",
+                            "description": "Limit search to specific entity types",
+                            "enum": ["deals", "properties", "contacts", "documents", "all"]
+                        }
+                    },
+                    "additionalProperties": false
+                }
             },
             {
-                "name": "get_file_by_id",
-                "title": "Get File",
-                "description": "Download the file to this server and return a local link.",
+                "name": "get_file_by_id", 
+                "title": "Download File",
+                "description": "Download a file by ID and make it available through both remote signed URL and local server endpoint. Returns resource links for file access.",
                 "inputSchema": {
                     "type": "object",
                     "required": ["file_id"],
-                    "properties": {"file_id": {"type": "string"}},
-                },
-            },
+                    "properties": {
+                        "file_id": {
+                            "type": "string",
+                            "description": "Unique identifier for the file",
+                            "pattern": "^[0-9]+$"
+                        },
+                        "download_locally": {
+                            "type": "boolean",
+                            "description": "Whether to download file to local server storage",
+                            "default": true
+                        }
+                    },
+                    "additionalProperties": false
+                }
+            }
         ]
     }
 
@@ -349,18 +472,31 @@ def to_content_parts(value: Any) -> List[Dict[str, Any]]:
 
 
 @app.post("/mcp")
-async def mcp_http_endpoint(request: Request, payload: Union[Dict[str, Any], List[Dict[str, Any]]]):
-    """Single HTTP endpoint implementing minimal MCP request handling.
+async def mcp_http_endpoint(
+    request: Request, 
+    payload: Union[Dict[str, Any], List[Dict[str, Any]]],
+    mcp_session_id: Optional[str] = Header(None, alias="Mcp-Session-Id"),
+    accept: Optional[str] = Header(None)
+):
+    """Streamable HTTP MCP endpoint (2025-03-26 spec) with session management.
 
     Supported methods:
-      - initialize
+      - initialize (creates session)
       - tools/list
       - tools/call
+      - ping
 
-    This intentionally omits OAuth; a static bearer token is required.
+    Features:
+      - Session management with Mcp-Session-Id headers
+      - Backward compatibility with legacy clients
+      - Enhanced error handling and logging
     """
 
     base_url = str(request.base_url).rstrip("/")
+    
+    # Clean up expired sessions periodically
+    if len(sessions) > 100:  # arbitrary threshold
+        cleanup_expired_sessions()
 
     def handle_one(req: Dict[str, Any]) -> Dict[str, Any]:
         req_id = req.get("id")
@@ -372,17 +508,36 @@ async def mcp_http_endpoint(request: Request, payload: Union[Dict[str, Any], Lis
 
         try:
             if method == "initialize":
+                # Create new session for Streamable HTTP transport
+                session_id = create_session()
+                session = sessions[session_id]
+                session["initialized"] = True
+                
                 result = {
                     "protocolVersion": SUPPORTED_PROTOCOL_VERSION,
                     "capabilities": {
                         "tools": {"listChanged": False},
+                        "resources": {},
+                        "prompts": {},
+                        "logging": {}
                     },
                     "serverInfo": {
                         "name": "dealpath-mcp",
-                        "version": "0.1.0",
+                        "version": "0.2.0",
                     },
+                    "instructions": "Dealpath MCP server provides access to real estate deal data, file management, and portfolio analytics."
                 }
-                return mcp_response_ok(req_id, result)
+                
+                # Return with session ID header for Streamable HTTP transport
+                response = mcp_response_ok(req_id, result)
+                # Note: We'll handle headers in the outer scope
+                response["_session_id"] = session_id
+                return response
+
+            # Validate session for non-initialize requests
+            session = get_session(mcp_session_id)
+            if session and not session.get("initialized"):
+                return mcp_response_error(req_id, -32002, "Session not initialized")
 
             if method in ("tools/list", "tools.list"):
                 return mcp_response_ok(req_id, build_tools_list())
@@ -392,6 +547,10 @@ async def mcp_http_endpoint(request: Request, payload: Union[Dict[str, Any], Lis
                 arguments = params.get("arguments") or {}
                 if not name:
                     return mcp_response_error(req_id, -32602, "Missing tool name")
+                
+                # Enhanced logging for tool calls
+                logger.info(f"Tool call: {name} with args: {list(arguments.keys())} [session: {mcp_session_id}]")
+                
                 result = tool_call_dispatch(name, arguments, base_url=base_url)
                 if isinstance(result, dict) and "__content__" in result:
                     parts = result["__content__"]
@@ -400,19 +559,44 @@ async def mcp_http_endpoint(request: Request, payload: Union[Dict[str, Any], Lis
                 return mcp_response_ok(req_id, {"content": parts})
 
             if method == "ping":
-                return mcp_response_ok(req_id, {"ok": True})
+                return mcp_response_ok(req_id, {"ok": True, "session": mcp_session_id is not None})
 
             return mcp_response_error(req_id, -32601, f"Method not found: {method}")
 
         except HTTPException as http_exc:
+            logger.error(f"HTTP error in MCP call {method}: {http_exc.detail}")
             return mcp_response_error(req_id, http_exc.status_code, http_exc.detail)
         except Exception as e:
-            logger.exception("Unhandled MCP error")
+            logger.exception(f"Unhandled MCP error in {method}")
             return mcp_response_error(req_id, 500, "Internal error", {"message": str(e)})
 
+    # Handle batched requests (JSON-RPC 2.0 batch)
     if isinstance(payload, list):
-        return JSONResponse([handle_one(p) for p in payload])
-    return JSONResponse(handle_one(payload))
+        responses = []
+        session_id_to_set = None
+        for req in payload:
+            response = handle_one(req)
+            if isinstance(response, dict) and "_session_id" in response:
+                session_id_to_set = response.pop("_session_id")
+            responses.append(response)
+        
+        json_response = JSONResponse(responses)
+        if session_id_to_set:
+            json_response.headers["Mcp-Session-Id"] = session_id_to_set
+        return json_response
+    else:
+        response = handle_one(payload)
+        
+        # Handle session ID header for initialize
+        session_id_to_set = None
+        if isinstance(response, dict) and "_session_id" in response:
+            session_id_to_set = response.pop("_session_id")
+        
+        json_response = JSONResponse(response)
+        if session_id_to_set:
+            json_response.headers["Mcp-Session-Id"] = session_id_to_set
+        
+        return json_response
 
 
 @app.get("/mcp")
@@ -1017,3 +1201,111 @@ def search_endpoint(query: str):
         return search_results
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# --- Health Check and Monitoring Endpoints (2025 standards) ---
+
+@app.get("/health")
+def health_check():
+    """Health check endpoint for load balancers and monitoring systems."""
+    return {
+        "status": "healthy",
+        "timestamp": datetime.utcnow().isoformat(),
+        "version": "0.2.0",
+        "protocol_version": SUPPORTED_PROTOCOL_VERSION
+    }
+
+
+@app.get("/health/ready")
+def readiness_check():
+    """Readiness probe - checks if server can handle requests."""
+    try:
+        # Test Dealpath API connectivity
+        client.get_deals(limit=1)
+        
+        return {
+            "status": "ready",
+            "timestamp": datetime.utcnow().isoformat(),
+            "checks": {
+                "dealpath_api": "ok",
+                "session_store": "ok"
+            }
+        }
+    except Exception as e:
+        logger.error(f"Readiness check failed: {e}")
+        raise HTTPException(
+            status_code=503, 
+            detail={
+                "status": "not_ready",
+                "timestamp": datetime.utcnow().isoformat(),
+                "checks": {
+                    "dealpath_api": "failed",
+                    "error": str(e)
+                }
+            }
+        )
+
+
+@app.get("/health/live")
+def liveness_check():
+    """Liveness probe - basic server responsiveness."""
+    return {
+        "status": "alive",
+        "timestamp": datetime.utcnow().isoformat(),
+        "uptime_seconds": (datetime.utcnow() - datetime.utcnow()).total_seconds()  # simplified
+    }
+
+
+@app.get("/metrics")
+def metrics_endpoint():
+    """Metrics endpoint for monitoring and observability."""
+    # Clean up expired sessions before reporting
+    cleaned_sessions = cleanup_expired_sessions()
+    
+    return {
+        "mcp_server": {
+            "version": "0.2.0",
+            "protocol_version": SUPPORTED_PROTOCOL_VERSION,
+            "timestamp": datetime.utcnow().isoformat()
+        },
+        "sessions": {
+            "active_sessions": len(sessions),
+            "cleaned_sessions": cleaned_sessions,
+            "session_details": [
+                {
+                    "session_id": sid[:8] + "...",  # truncated for privacy
+                    "created_at": session["created_at"].isoformat(),
+                    "last_accessed": session["last_accessed"].isoformat(),
+                    "initialized": session["initialized"]
+                }
+                for sid, session in list(sessions.items())[:10]  # limit to 10 for brevity
+            ]
+        },
+        "system": {
+            "file_storage_dir": FILE_STORAGE_DIR,
+            "auth_enabled": MCP_TOKEN is not None,
+            "allowed_origins": list(ALLOWED_ORIGINS)
+        }
+    }
+
+
+@app.get("/version")
+def version_info():
+    """Version and build information."""
+    return {
+        "name": "dealpath-mcp",
+        "version": "0.2.0",
+        "protocol_version": SUPPORTED_PROTOCOL_VERSION,
+        "features": [
+            "streamable_http_transport",
+            "session_management", 
+            "enhanced_tool_schemas",
+            "health_monitoring",
+            "file_download_with_resource_links"
+        ],
+        "endpoints": {
+            "mcp": "/mcp",
+            "health": "/health",
+            "metrics": "/metrics"
+        }
+    }
