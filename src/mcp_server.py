@@ -1,20 +1,17 @@
-from typing import Optional, List, Any, Dict, Callable, Union
-from fastapi import FastAPI, HTTPException, Query, Response, Request, status, Header
-from fastapi.responses import JSONResponse, StreamingResponse
-from fastapi.middleware.cors import CORSMiddleware
-from sse_starlette.sse import EventSourceResponse
-from collections import Counter
-from datetime import datetime, timedelta
-from dotenv import load_dotenv
-import os
+import json
 import logging
-import base64
-import requests
+import os
 import pathlib
 import re
-import uuid
-import json
-import asyncio
+from collections import Counter
+from datetime import datetime, timedelta
+from typing import Any, Optional, Union
+
+import requests
+from dotenv import load_dotenv
+from fastapi import FastAPI, Header, HTTPException, Query, Request, Response, status
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from uuid6 import uuid7
 
 from .dealpath_client import DealpathClient
@@ -29,12 +26,21 @@ app = FastAPI(title="Dealpath MCP Server (Streamable HTTP)")
 client = DealpathClient()
 
 MCP_TOKEN = os.getenv("mcp_token")
-ALLOWED_ORIGINS = {o.strip() for o in (os.getenv("allowed_origins", "http://127.0.0.1,http://localhost").split(",")) if o.strip()}
+ALLOWED_ORIGINS = {
+    o.strip()
+    for o in (
+        os.getenv("allowed_origins", "http://127.0.0.1,http://localhost").split(",")
+    )
+    if o.strip()
+}
 SUPPORTED_PROTOCOL_VERSION = "2025-06-18"
-FILE_STORAGE_DIR = os.getenv("file_storage_dir", os.path.join(os.getcwd(), "local_files"))
+FILE_STORAGE_DIR = os.getenv(
+    "file_storage_dir", os.path.join(os.getcwd(), "local_files")
+)
 
 # Session management for Streamable HTTP transport
-sessions: Dict[str, Dict[str, Any]] = {}
+sessions: dict[str, dict[str, Any]] = {}
+
 
 def create_session() -> str:
     """Create a new MCP session with secure session ID."""
@@ -43,31 +49,35 @@ def create_session() -> str:
         "created_at": datetime.utcnow(),
         "last_accessed": datetime.utcnow(),
         "protocol_version": SUPPORTED_PROTOCOL_VERSION,
-        "initialized": False
+        "initialized": False,
     }
     logger.info(f"Created new MCP session: {session_id}")
     return session_id
 
-def get_session(session_id: Optional[str]) -> Optional[Dict[str, Any]]:
+
+def get_session(session_id: Optional[str]) -> Optional[dict[str, Any]]:
     """Get session data if valid, otherwise None."""
     if not session_id or session_id not in sessions:
         return None
-    
+
     session = sessions[session_id]
     session["last_accessed"] = datetime.utcnow()
     return session
 
+
 def cleanup_expired_sessions(max_age_hours: int = 24):
     """Clean up expired sessions."""
     cutoff = datetime.utcnow() - timedelta(hours=max_age_hours)
-    expired = [sid for sid, session in sessions.items() 
-               if session["last_accessed"] < cutoff]
-    
+    expired = [
+        sid for sid, session in sessions.items() if session["last_accessed"] < cutoff
+    ]
+
     for session_id in expired:
         del sessions[session_id]
         logger.info(f"Cleaned up expired session: {session_id}")
-    
+
     return len(expired)
+
 
 if not MCP_TOKEN:
     logger.info(
@@ -98,7 +108,12 @@ async def auth_and_origin_middleware(request: Request, call_next):
             if origin and origin not in ALLOWED_ORIGINS:
                 return JSONResponse(
                     status_code=status.HTTP_403_FORBIDDEN,
-                    content={"error": {"code": "forbidden_origin", "message": "Origin not allowed."}},
+                    content={
+                        "error": {
+                            "code": "forbidden_origin",
+                            "message": "Origin not allowed.",
+                        }
+                    },
                 )
 
             authz = request.headers.get("authorization", "")
@@ -106,7 +121,12 @@ async def auth_and_origin_middleware(request: Request, call_next):
             if scheme.lower() != "bearer" or not token or token != MCP_TOKEN:
                 return JSONResponse(
                     status_code=status.HTTP_401_UNAUTHORIZED,
-                    content={"error": {"code": "unauthorized", "message": "Missing or invalid bearer token."}},
+                    content={
+                        "error": {
+                            "code": "unauthorized",
+                            "message": "Missing or invalid bearer token.",
+                        }
+                    },
                     headers={"WWW-Authenticate": "Bearer"},
                 )
 
@@ -125,7 +145,8 @@ app.add_middleware(
 
 # --- Minimal MCP over HTTP (non-OAuth) -------------------------------------
 
-Json = Dict[str, Any]
+Json = dict[str, Any]
+
 
 def mcp_response_ok(req_id: Any, result: Any) -> Json:
     return {"jsonrpc": "2.0", "id": req_id, "result": result}
@@ -138,7 +159,7 @@ def mcp_response_error(req_id: Any, code: int, message: str, data: Any = None) -
     return {"jsonrpc": "2.0", "id": req_id, "error": err}
 
 
-def build_tools_list() -> Dict[str, Any]:
+def build_tools_list() -> dict[str, Any]:
     """Declare available tools with comprehensive schemas for MCP tools/list (2025 spec)."""
     return {
         "tools": [
@@ -152,23 +173,31 @@ def build_tools_list() -> Dict[str, Any]:
                         "status": {
                             "type": "string",
                             "description": "Filter by deal status",
-                            "enum": ["Active", "Closed", "Potential", "Terminated"]
+                            "enum": ["Active", "Closed", "Potential", "Terminated"],
                         },
                         "propertyType": {
-                            "type": "string", 
+                            "type": "string",
                             "description": "Filter by property type",
-                            "enum": ["Office", "Retail", "Industrial", "Multifamily", "Hotel", "Mixed Use", "Other"]
+                            "enum": [
+                                "Office",
+                                "Retail",
+                                "Industrial",
+                                "Multifamily",
+                                "Hotel",
+                                "Mixed Use",
+                                "Other",
+                            ],
                         },
                         "limit": {
                             "type": "integer",
                             "description": "Maximum number of deals to return",
                             "minimum": 1,
                             "maximum": 100,
-                            "default": 20
-                        }
+                            "default": 20,
+                        },
                     },
-                    "additionalProperties": false
-                }
+                    "additionalProperties": False,
+                },
             },
             {
                 "name": "get_deal",
@@ -181,11 +210,11 @@ def build_tools_list() -> Dict[str, Any]:
                         "deal_id": {
                             "type": "string",
                             "description": "Unique identifier for the deal",
-                            "pattern": "^[0-9]+$"
+                            "pattern": "^[0-9]+$",
                         }
                     },
-                    "additionalProperties": false
-                }
+                    "additionalProperties": False,
+                },
             },
             {
                 "name": "get_deal_files",
@@ -198,33 +227,33 @@ def build_tools_list() -> Dict[str, Any]:
                         "deal_id": {
                             "type": "integer",
                             "description": "Unique identifier for the deal",
-                            "minimum": 1
+                            "minimum": 1,
                         },
                         "parent_folder_ids": {
                             "type": "array",
                             "description": "Filter files by parent folder IDs",
-                            "items": {"type": "integer", "minimum": 1}
+                            "items": {"type": "integer", "minimum": 1},
                         },
                         "file_tag_definition_ids": {
-                            "type": "array", 
+                            "type": "array",
                             "description": "Filter files by tag definition IDs",
-                            "items": {"type": "integer", "minimum": 1}
+                            "items": {"type": "integer", "minimum": 1},
                         },
                         "updated_before": {
                             "type": "integer",
-                            "description": "Unix timestamp - only return files updated before this time"
+                            "description": "Unix timestamp - only return files updated before this time",
                         },
                         "updated_after": {
-                            "type": "integer", 
-                            "description": "Unix timestamp - only return files updated after this time"
+                            "type": "integer",
+                            "description": "Unix timestamp - only return files updated after this time",
                         },
                         "next_token": {
                             "type": "string",
-                            "description": "Pagination token for retrieving next page of results"
-                        }
+                            "description": "Pagination token for retrieving next page of results",
+                        },
                     },
-                    "additionalProperties": false
-                }
+                    "additionalProperties": False,
+                },
             },
             {
                 "name": "get_portfolio_summary",
@@ -238,11 +267,11 @@ def build_tools_list() -> Dict[str, Any]:
                             "description": "Number of days to look back for activity",
                             "minimum": 1,
                             "maximum": 365,
-                            "default": 14
+                            "default": 14,
                         }
                     },
-                    "additionalProperties": false
-                }
+                    "additionalProperties": False,
+                },
             },
             {
                 "name": "search",
@@ -256,19 +285,25 @@ def build_tools_list() -> Dict[str, Any]:
                             "type": "string",
                             "description": "Search query string",
                             "minLength": 1,
-                            "maxLength": 500
+                            "maxLength": 500,
                         },
                         "entity_type": {
                             "type": "string",
                             "description": "Limit search to specific entity types",
-                            "enum": ["deals", "properties", "contacts", "documents", "all"]
-                        }
+                            "enum": [
+                                "deals",
+                                "properties",
+                                "contacts",
+                                "documents",
+                                "all",
+                            ],
+                        },
                     },
-                    "additionalProperties": false
-                }
+                    "additionalProperties": False,
+                },
             },
             {
-                "name": "get_file_by_id", 
+                "name": "get_file_by_id",
                 "title": "Download File",
                 "description": "Download a file by ID and make it available through both remote signed URL and local server endpoint. Returns resource links for file access.",
                 "inputSchema": {
@@ -278,17 +313,101 @@ def build_tools_list() -> Dict[str, Any]:
                         "file_id": {
                             "type": "string",
                             "description": "Unique identifier for the file",
-                            "pattern": "^[0-9]+$"
+                            "pattern": "^[0-9]+$",
                         },
                         "download_locally": {
                             "type": "boolean",
                             "description": "Whether to download file to local server storage",
-                            "default": true
+                            "default": True,
+                        },
+                    },
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "name": "executive_portfolio_overview",
+                "title": "📊 Executive Portfolio Overview",
+                "description": "Generate comprehensive C-suite portfolio analytics including deal counts, property type breakdown, geographic distribution, and key performance indicators.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "days_back": {
+                            "type": "integer",
+                            "description": "Number of days to analyze for trends",
+                            "minimum": 30,
+                            "maximum": 365,
+                            "default": 90,
                         }
                     },
-                    "additionalProperties": false
-                }
-            }
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "name": "deal_velocity_analysis",
+                "title": "🚀 Deal Velocity & Pipeline Analysis",
+                "description": "Analyze deal flow velocity, conversion rates, pipeline health, and forecasting metrics for strategic planning.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "lookback_months": {
+                            "type": "integer",
+                            "description": "Number of months to analyze for velocity trends",
+                            "minimum": 3,
+                            "maximum": 24,
+                            "default": 6,
+                        }
+                    },
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "name": "market_performance_insights",
+                "title": "📈 Market Performance & Trends",
+                "description": "Generate market intelligence including property type performance, geographic hotspots, competitive landscape analysis, and market health indicators.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "property_types": {
+                            "type": "array",
+                            "description": "Filter analysis to specific property types",
+                            "items": {
+                                "type": "string",
+                                "enum": [
+                                    "Office",
+                                    "Retail",
+                                    "Industrial",
+                                    "Multifamily",
+                                    "Hotel",
+                                    "Mixed Use",
+                                    "Other",
+                                ],
+                            },
+                        },
+                        "include_competitive_analysis": {
+                            "type": "boolean",
+                            "description": "Include competitive landscape insights",
+                            "default": True,
+                        },
+                    },
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "name": "risk_exposure_analysis",
+                "title": "⚠️ Risk Assessment & Exposure Analysis",
+                "description": "Comprehensive risk analysis including concentration risk, geographic exposure, liquidity analysis, and portfolio risk scoring with strategic recommendations.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "include_recommendations": {
+                            "type": "boolean",
+                            "description": "Include strategic risk mitigation recommendations",
+                            "default": True,
+                        }
+                    },
+                    "additionalProperties": False,
+                },
+            },
         ]
     }
 
@@ -339,7 +458,9 @@ def _absolute_local_url(base_url: str, relpath: str) -> str:
     return f"{base}/local-files/{rel}"
 
 
-def tool_call_dispatch(name: str, arguments: Dict[str, Any], *, base_url: Optional[str] = None) -> Any:
+def tool_call_dispatch(
+    name: str, arguments: dict[str, Any], *, base_url: Optional[str] = None
+) -> Any:
     if name == "get_deals":
         status_val = arguments.get("status")
         property_type = arguments.get("propertyType")
@@ -360,14 +481,16 @@ def tool_call_dispatch(name: str, arguments: Dict[str, Any], *, base_url: Option
         deal_id = arguments.get("deal_id")
         if deal_id is None:
             raise HTTPException(status_code=400, detail="deal_id is required")
-        params = {k: v for k, v in arguments.items() if k != "deal_id" and v is not None}
+        params = {
+            k: v for k, v in arguments.items() if k != "deal_id" and v is not None
+        }
         return client.get_deal_files_by_id(deal_id, **params)
 
     if name == "get_portfolio_summary":
         response = client.get_deals()
         deal_list = response.get("deals", {}).get("data", [])
         two_weeks_ago = datetime.utcnow() - timedelta(weeks=2)
-        recent_deals: List[Dict[str, Any]] = []
+        recent_deals: list[dict[str, Any]] = []
         for deal in deal_list:
             last_updated_str = deal.get("last_updated")
             if last_updated_str:
@@ -397,8 +520,8 @@ def tool_call_dispatch(name: str, arguments: Dict[str, Any], *, base_url: Option
         file_id = arguments.get("file_id")
         if not file_id:
             raise HTTPException(status_code=400, detail="file_id is required")
-        parts: List[Dict[str, Any]] = []
-        
+        parts: list[dict[str, Any]] = []
+
         # Prefer signed URL; include remote link and also save locally
         try:
             info = client.get_file_download_url(file_id)
@@ -409,7 +532,9 @@ def tool_call_dispatch(name: str, arguments: Dict[str, Any], *, base_url: Option
                     r = requests.get(url, stream=True)
                     r.raise_for_status()
                     rel = _store_stream_locally(file_id, filename, r)
-                    local_uri = _absolute_local_url(base_url or "http://127.0.0.1:8000", rel)
+                    local_uri = _absolute_local_url(
+                        base_url or "http://127.0.0.1:8000", rel
+                    )
                     # Build a summary text part to ensure both links are visible in UIs
                     summary = (
                         f"Links for file '{filename}' (id {file_id}):\n"
@@ -418,12 +543,18 @@ def tool_call_dispatch(name: str, arguments: Dict[str, Any], *, base_url: Option
                     )
                     parts.append({"type": "text", "text": summary})
                     # Add local first, remote last (some clients display only the last part)
-                    parts.append({"type": "resource_link", "name": filename, "uri": local_uri})
-                    parts.append({"type": "resource_link", "name": filename, "uri": url})
+                    parts.append(
+                        {"type": "resource_link", "name": filename, "uri": local_uri}
+                    )
+                    parts.append(
+                        {"type": "resource_link", "name": filename, "uri": url}
+                    )
                     return {"__content__": parts}
                 except Exception:
                     # If local save fails, still return the remote link (as last part)
-                    parts.append({"type": "resource_link", "name": filename, "uri": url})
+                    parts.append(
+                        {"type": "resource_link", "name": filename, "uri": url}
+                    )
                     return {"__content__": parts}
         except Exception:
             # proceed to direct download fallback
@@ -436,22 +567,39 @@ def tool_call_dispatch(name: str, arguments: Dict[str, Any], *, base_url: Option
             rel = _store_bytes_locally(file_id, filename, data["content"])
             local_uri = _absolute_local_url(base_url or "http://127.0.0.1:8000", rel)
             summary = (
-                f"Links for file '{filename}' (id {file_id}):\n"
-                f"- Local: {local_uri}"
+                f"Links for file '{filename}' (id {file_id}):\n" f"- Local: {local_uri}"
             )
             parts.append({"type": "text", "text": summary})
             parts.append({"type": "resource_link", "name": filename, "uri": local_uri})
             return {"__content__": parts}
         except requests.HTTPError as http_err:
             resp = http_err.response
-            raise HTTPException(status_code=resp.status_code, detail=f"Dealpath error: {resp.text}")
+            raise HTTPException(
+                status_code=resp.status_code, detail=f"Dealpath error: {resp.text}"
+            )
         except Exception as e:
             raise HTTPException(status_code=502, detail=f"Failed to fetch file: {e}")
+
+    # Executive Analytics Tools
+    if name == "executive_portfolio_overview":
+        days_back = arguments.get("days_back", 90)
+        return client.get_executive_portfolio_overview(days_back=days_back)
+
+    if name == "deal_velocity_analysis":
+        lookback_months = arguments.get("lookback_months", 6)
+        return client.get_deal_velocity_analysis(lookback_months=lookback_months)
+
+    if name == "market_performance_insights":
+        property_types = arguments.get("property_types")
+        return client.get_market_performance_insights(property_types=property_types)
+
+    if name == "risk_exposure_analysis":
+        return client.get_risk_exposure_analysis()
 
     raise HTTPException(status_code=404, detail=f"Unknown tool: {name}")
 
 
-def to_content_parts(value: Any) -> List[Dict[str, Any]]:
+def to_content_parts(value: Any) -> list[dict[str, Any]]:
     """Convert a Python value to MCP content parts array.
 
     For maximum client compatibility, return a single `text` part.
@@ -459,7 +607,6 @@ def to_content_parts(value: Any) -> List[Dict[str, Any]]:
     - str → as-is
     - other scalars → stringified
     """
-    import json
 
     if isinstance(value, str):
         text = value
@@ -473,10 +620,10 @@ def to_content_parts(value: Any) -> List[Dict[str, Any]]:
 
 @app.post("/mcp")
 async def mcp_http_endpoint(
-    request: Request, 
-    payload: Union[Dict[str, Any], List[Dict[str, Any]]],
+    request: Request,
+    payload: Union[dict[str, Any], list[dict[str, Any]]],
     mcp_session_id: Optional[str] = Header(None, alias="Mcp-Session-Id"),
-    accept: Optional[str] = Header(None)
+    accept: Optional[str] = Header(None),
 ):
     """Streamable HTTP MCP endpoint (2025-03-26 spec) with session management.
 
@@ -493,15 +640,15 @@ async def mcp_http_endpoint(
     """
 
     base_url = str(request.base_url).rstrip("/")
-    
+
     # Clean up expired sessions periodically
     if len(sessions) > 100:  # arbitrary threshold
         cleanup_expired_sessions()
 
-    def handle_one(req: Dict[str, Any]) -> Dict[str, Any]:
+    def handle_one(req: dict[str, Any]) -> dict[str, Any]:
         req_id = req.get("id")
         method = req.get("method") or req.get("type")  # tolerate `type` alias
-        params: Dict[str, Any] = req.get("params") or {}
+        params: dict[str, Any] = req.get("params") or {}
 
         if not method:
             return mcp_response_error(req_id, -32600, "Missing method")
@@ -512,22 +659,22 @@ async def mcp_http_endpoint(
                 session_id = create_session()
                 session = sessions[session_id]
                 session["initialized"] = True
-                
+
                 result = {
                     "protocolVersion": SUPPORTED_PROTOCOL_VERSION,
                     "capabilities": {
                         "tools": {"listChanged": False},
                         "resources": {},
                         "prompts": {},
-                        "logging": {}
+                        "logging": {},
                     },
                     "serverInfo": {
                         "name": "dealpath-mcp",
                         "version": "0.2.0",
                     },
-                    "instructions": "Dealpath MCP server provides access to real estate deal data, file management, and portfolio analytics."
+                    "instructions": "Dealpath MCP server provides access to real estate deal data, file management, and portfolio analytics.",
                 }
-                
+
                 # Return with session ID header for Streamable HTTP transport
                 response = mcp_response_ok(req_id, result)
                 # Note: We'll handle headers in the outer scope
@@ -547,10 +694,12 @@ async def mcp_http_endpoint(
                 arguments = params.get("arguments") or {}
                 if not name:
                     return mcp_response_error(req_id, -32602, "Missing tool name")
-                
+
                 # Enhanced logging for tool calls
-                logger.info(f"Tool call: {name} with args: {list(arguments.keys())} [session: {mcp_session_id}]")
-                
+                logger.info(
+                    f"Tool call: {name} with args: {list(arguments.keys())} [session: {mcp_session_id}]"
+                )
+
                 result = tool_call_dispatch(name, arguments, base_url=base_url)
                 if isinstance(result, dict) and "__content__" in result:
                     parts = result["__content__"]
@@ -559,7 +708,9 @@ async def mcp_http_endpoint(
                 return mcp_response_ok(req_id, {"content": parts})
 
             if method == "ping":
-                return mcp_response_ok(req_id, {"ok": True, "session": mcp_session_id is not None})
+                return mcp_response_ok(
+                    req_id, {"ok": True, "session": mcp_session_id is not None}
+                )
 
             return mcp_response_error(req_id, -32601, f"Method not found: {method}")
 
@@ -568,7 +719,9 @@ async def mcp_http_endpoint(
             return mcp_response_error(req_id, http_exc.status_code, http_exc.detail)
         except Exception as e:
             logger.exception(f"Unhandled MCP error in {method}")
-            return mcp_response_error(req_id, 500, "Internal error", {"message": str(e)})
+            return mcp_response_error(
+                req_id, 500, "Internal error", {"message": str(e)}
+            )
 
     # Handle batched requests (JSON-RPC 2.0 batch)
     if isinstance(payload, list):
@@ -579,23 +732,23 @@ async def mcp_http_endpoint(
             if isinstance(response, dict) and "_session_id" in response:
                 session_id_to_set = response.pop("_session_id")
             responses.append(response)
-        
+
         json_response = JSONResponse(responses)
         if session_id_to_set:
             json_response.headers["Mcp-Session-Id"] = session_id_to_set
         return json_response
     else:
         response = handle_one(payload)
-        
+
         # Handle session ID header for initialize
         session_id_to_set = None
         if isinstance(response, dict) and "_session_id" in response:
             session_id_to_set = response.pop("_session_id")
-        
+
         json_response = JSONResponse(response)
         if session_id_to_set:
             json_response.headers["Mcp-Session-Id"] = session_id_to_set
-        
+
         return json_response
 
 
@@ -625,10 +778,14 @@ async def serve_local_file(date: str, file_id: str, filename: str):
         raise HTTPException(status_code=404, detail="File not found")
     # Stream file back
     from fastapi.responses import FileResponse
+
     return FileResponse(path)
 
+
 @app.get("/mcp/getDeals")
-def get_deals_endpoint(status: Optional[str] = None, propertyType: Optional[str] = None):
+def get_deals_endpoint(
+    status: Optional[str] = None, propertyType: Optional[str] = None
+):
     """
     Retrieves a list of deals, with optional filtering by status and property type.
 
@@ -642,14 +799,15 @@ def get_deals_endpoint(status: Optional[str] = None, propertyType: Optional[str]
     try:
         filters = {}
         if status:
-            filters['status'] = status
+            filters["status"] = status
         if propertyType:
-            filters['propertyType'] = propertyType
+            filters["propertyType"] = propertyType
 
         deals = client.get_deals(**filters)
         return deals
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.get("/mcp/getDeal/{deal_id}")
 def get_deal_by_id_endpoint(deal_id: str):
@@ -672,11 +830,11 @@ def get_deal_by_id_endpoint(deal_id: str):
 @app.get("/mcp/getDealFiles/{deal_id}")
 def get_deal_files_by_id_endpoint(
     deal_id: int,
-    parent_folder_ids: Optional[List[int]] = Query(None),
-    file_tag_definition_ids: Optional[List[int]] = Query(None),
+    parent_folder_ids: Optional[list[int]] = Query(None),
+    file_tag_definition_ids: Optional[list[int]] = Query(None),
     updated_before: Optional[int] = Query(None),
     updated_after: Optional[int] = Query(None),
-    next_token: Optional[str] = Query(None)
+    next_token: Optional[str] = Query(None),
 ):
     """
     Retrieves a list of files for a specific deal, with optional filtering.
@@ -695,15 +853,15 @@ def get_deal_files_by_id_endpoint(
     try:
         params = {}
         if parent_folder_ids:
-            params['parent_folder_ids'] = parent_folder_ids
+            params["parent_folder_ids"] = parent_folder_ids
         if file_tag_definition_ids:
-            params['file_tag_definition_ids'] = file_tag_definition_ids
+            params["file_tag_definition_ids"] = file_tag_definition_ids
         if updated_before:
-            params['updated_before'] = updated_before
+            params["updated_before"] = updated_before
         if updated_after:
-            params['updated_after'] = updated_after
+            params["updated_after"] = updated_after
         if next_token:
-            params['next_token'] = next_token
+            params["next_token"] = next_token
 
         files = client.get_deal_files_by_id(deal_id, **params)
         return files
@@ -721,38 +879,36 @@ def get_portfolio_summary_endpoint():
     """
     try:
         response = client.get_deals()
-        deal_list = response.get('deals', {}).get('data', [])
+        deal_list = response.get("deals", {}).get("data", [])
 
         # Filter for deals updated in the last two weeks
         two_weeks_ago = datetime.utcnow() - timedelta(weeks=2)
         recent_deals = []
         for deal in deal_list:
-            last_updated_str = deal.get('last_updated')
+            last_updated_str = deal.get("last_updated")
             if last_updated_str:
                 # Parse the date, assuming UTC (Z suffix)
-                last_updated_date = datetime.fromisoformat(last_updated_str.replace('Z', ''))
+                last_updated_date = datetime.fromisoformat(
+                    last_updated_str.replace("Z", "")
+                )
                 if last_updated_date > two_weeks_ago:
                     recent_deals.append(deal)
-        
-        deal_list = recent_deals # Continue with the filtered list
+
+        deal_list = recent_deals  # Continue with the filtered list
 
         if not deal_list:
-            return {
-                "totalDeals": 0,
-                "dealsByStatus": {},
-                "dealsByPropertyType": {}
-            }
+            return {"totalDeals": 0, "dealsByStatus": {}, "dealsByPropertyType": {}}
 
         total_deals = len(deal_list)
 
         # Use 'deal_state' for status and 'deal_type' for property type
-        status_counts = Counter(d.get('deal_state') for d in deal_list)
-        property_type_counts = Counter(d.get('deal_type') for d in deal_list)
+        status_counts = Counter(d.get("deal_state") for d in deal_list)
+        property_type_counts = Counter(d.get("deal_type") for d in deal_list)
 
         return {
             "totalDeals": total_deals,
             "dealsByStatus": dict(status_counts),
-            "dealsByPropertyType": dict(property_type_counts)
+            "dealsByPropertyType": dict(property_type_counts),
         }
 
     except Exception as e:
@@ -760,7 +916,9 @@ def get_portfolio_summary_endpoint():
 
 
 @app.get("/mcp/getAssets")
-def get_assets_endpoint(property_type: Optional[str] = None, status: Optional[str] = None):
+def get_assets_endpoint(
+    property_type: Optional[str] = None, status: Optional[str] = None
+):
     """
     Retrieves a list of assets, with optional filtering by property type and status.
 
@@ -774,9 +932,9 @@ def get_assets_endpoint(property_type: Optional[str] = None, status: Optional[st
     try:
         filters = {}
         if property_type:
-            filters['propertyType'] = property_type
+            filters["propertyType"] = property_type
         if status:
-            filters['status'] = status
+            filters["status"] = status
         assets = client.get_assets(**filters)
         return assets
     except Exception as e:
@@ -784,7 +942,9 @@ def get_assets_endpoint(property_type: Optional[str] = None, status: Optional[st
 
 
 @app.get("/mcp/getFieldDefinitions")
-def get_field_definitions_endpoint(page: Optional[int] = None, per_page: Optional[int] = None):
+def get_field_definitions_endpoint(
+    page: Optional[int] = None, per_page: Optional[int] = None
+):
     """
     Retrieves a list of field definitions, with optional pagination.
 
@@ -798,9 +958,9 @@ def get_field_definitions_endpoint(page: Optional[int] = None, per_page: Optiona
     try:
         params = {}
         if page:
-            params['page'] = page
+            params["page"] = page
         if per_page:
-            params['per_page'] = per_page
+            params["per_page"] = per_page
         field_definitions = client.get_field_definitions(**params)
         return field_definitions
     except Exception as e:
@@ -951,14 +1111,16 @@ def get_file_by_id_endpoint(file_id: str):
             media_type="application/octet-stream",
             headers={
                 "Content-Disposition": f"attachment; filename={file_data['filename']}"
-            }
+            },
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/mcp/getFileTagDefinitions")
-def get_file_tag_definitions_endpoint(page: Optional[int] = None, per_page: Optional[int] = None):
+def get_file_tag_definitions_endpoint(
+    page: Optional[int] = None, per_page: Optional[int] = None
+):
     """
     Retrieves a list of file tag definitions, with optional pagination.
 
@@ -972,9 +1134,9 @@ def get_file_tag_definitions_endpoint(page: Optional[int] = None, per_page: Opti
     try:
         params = {}
         if page:
-            params['page'] = page
+            params["page"] = page
         if per_page:
-            params['per_page'] = per_page
+            params["per_page"] = per_page
         tag_definitions = client.get_file_tag_definitions(**params)
         return tag_definitions
     except Exception as e:
@@ -1018,7 +1180,9 @@ def get_folders_by_asset_id_endpoint(asset_id: int):
 
 
 @app.get("/mcp/getInvestments")
-def get_investments_endpoint(page: Optional[int] = None, per_page: Optional[int] = None):
+def get_investments_endpoint(
+    page: Optional[int] = None, per_page: Optional[int] = None
+):
     """
     Retrieves a list of investments, with optional pagination.
 
@@ -1032,9 +1196,9 @@ def get_investments_endpoint(page: Optional[int] = None, per_page: Optional[int]
     try:
         params = {}
         if page:
-            params['page'] = page
+            params["page"] = page
         if per_page:
-            params['per_page'] = per_page
+            params["per_page"] = per_page
         investments = client.get_investments(**params)
         return investments
     except Exception as e:
@@ -1053,7 +1217,9 @@ def get_list_options_by_field_definition_id_endpoint(field_definition_id: str):
         A JSON object containing the list options.
     """
     try:
-        list_options = client.get_list_options_by_field_definition_id(field_definition_id)
+        list_options = client.get_list_options_by_field_definition_id(
+            field_definition_id
+        )
         return list_options
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -1074,9 +1240,9 @@ def get_loans_endpoint(page: Optional[int] = None, per_page: Optional[int] = Non
     try:
         params = {}
         if page:
-            params['page'] = page
+            params["page"] = page
         if per_page:
-            params['per_page'] = per_page
+            params["per_page"] = per_page
         loans = client.get_loans(**params)
         return loans
     except Exception as e:
@@ -1098,9 +1264,9 @@ def get_people_endpoint(page: Optional[int] = None, per_page: Optional[int] = No
     try:
         params = {}
         if page:
-            params['page'] = page
+            params["page"] = page
         if per_page:
-            params['per_page'] = per_page
+            params["per_page"] = per_page
         people = client.get_people(**params)
         return people
     except Exception as e:
@@ -1140,9 +1306,9 @@ def get_properties_endpoint(page: Optional[int] = None, per_page: Optional[int] 
     try:
         params = {}
         if page:
-            params['page'] = page
+            params["page"] = page
         if per_page:
-            params['per_page'] = per_page
+            params["per_page"] = per_page
         properties = client.get_properties(**params)
         return properties
     except Exception as e:
@@ -1205,6 +1371,7 @@ def search_endpoint(query: str):
 
 # --- Health Check and Monitoring Endpoints (2025 standards) ---
 
+
 @app.get("/health")
 def health_check():
     """Health check endpoint for load balancers and monitoring systems."""
@@ -1212,7 +1379,7 @@ def health_check():
         "status": "healthy",
         "timestamp": datetime.utcnow().isoformat(),
         "version": "0.2.0",
-        "protocol_version": SUPPORTED_PROTOCOL_VERSION
+        "protocol_version": SUPPORTED_PROTOCOL_VERSION,
     }
 
 
@@ -1222,27 +1389,21 @@ def readiness_check():
     try:
         # Test Dealpath API connectivity
         client.get_deals(limit=1)
-        
+
         return {
             "status": "ready",
             "timestamp": datetime.utcnow().isoformat(),
-            "checks": {
-                "dealpath_api": "ok",
-                "session_store": "ok"
-            }
+            "checks": {"dealpath_api": "ok", "session_store": "ok"},
         }
     except Exception as e:
         logger.error(f"Readiness check failed: {e}")
         raise HTTPException(
-            status_code=503, 
+            status_code=503,
             detail={
                 "status": "not_ready",
                 "timestamp": datetime.utcnow().isoformat(),
-                "checks": {
-                    "dealpath_api": "failed",
-                    "error": str(e)
-                }
-            }
+                "checks": {"dealpath_api": "failed", "error": str(e)},
+            },
         )
 
 
@@ -1252,7 +1413,9 @@ def liveness_check():
     return {
         "status": "alive",
         "timestamp": datetime.utcnow().isoformat(),
-        "uptime_seconds": (datetime.utcnow() - datetime.utcnow()).total_seconds()  # simplified
+        "uptime_seconds": (
+            datetime.utcnow() - datetime.utcnow()
+        ).total_seconds(),  # simplified
     }
 
 
@@ -1261,12 +1424,12 @@ def metrics_endpoint():
     """Metrics endpoint for monitoring and observability."""
     # Clean up expired sessions before reporting
     cleaned_sessions = cleanup_expired_sessions()
-    
+
     return {
         "mcp_server": {
             "version": "0.2.0",
             "protocol_version": SUPPORTED_PROTOCOL_VERSION,
-            "timestamp": datetime.utcnow().isoformat()
+            "timestamp": datetime.utcnow().isoformat(),
         },
         "sessions": {
             "active_sessions": len(sessions),
@@ -1276,16 +1439,18 @@ def metrics_endpoint():
                     "session_id": sid[:8] + "...",  # truncated for privacy
                     "created_at": session["created_at"].isoformat(),
                     "last_accessed": session["last_accessed"].isoformat(),
-                    "initialized": session["initialized"]
+                    "initialized": session["initialized"],
                 }
-                for sid, session in list(sessions.items())[:10]  # limit to 10 for brevity
-            ]
+                for sid, session in list(sessions.items())[
+                    :10
+                ]  # limit to 10 for brevity
+            ],
         },
         "system": {
             "file_storage_dir": FILE_STORAGE_DIR,
             "auth_enabled": MCP_TOKEN is not None,
-            "allowed_origins": list(ALLOWED_ORIGINS)
-        }
+            "allowed_origins": list(ALLOWED_ORIGINS),
+        },
     }
 
 
@@ -1298,14 +1463,10 @@ def version_info():
         "protocol_version": SUPPORTED_PROTOCOL_VERSION,
         "features": [
             "streamable_http_transport",
-            "session_management", 
+            "session_management",
             "enhanced_tool_schemas",
             "health_monitoring",
-            "file_download_with_resource_links"
+            "file_download_with_resource_links",
         ],
-        "endpoints": {
-            "mcp": "/mcp",
-            "health": "/health",
-            "metrics": "/metrics"
-        }
+        "endpoints": {"mcp": "/mcp", "health": "/health", "metrics": "/metrics"},
     }
