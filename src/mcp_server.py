@@ -322,6 +322,27 @@ def build_tools_list() -> dict[str, Any]:
                 },
             },
             {
+                "name": "get_fields_by_field_definition_id",
+                "title": "Get Fields For Field Definition",
+                "description": "Returns field values and metadata for a specific field definition, with pagination via next_token. Response object has keys: fields.data (array) and fields.next_token (string or null).",
+                "inputSchema": {
+                    "type": "object",
+                    "required": ["field_definition_id"],
+                    "properties": {
+                        "field_definition_id": {
+                            "type": "string",
+                            "description": "Field Definition ID",
+                            "pattern": "^[0-9]+$",
+                        },
+                        "next_token": {
+                            "type": "string",
+                            "description": "Pagination token from previous response to fetch next page",
+                        },
+                    },
+                    "additionalProperties": False,
+                },
+            },
+            {
                 "name": "get_deal_files",
                 "title": "List Deal Files",
                 "description": "Retrieve files associated with a deal, with optional filtering by folder and tags.",
@@ -626,6 +647,17 @@ def tool_call_dispatch(
         if arguments.get("next_token"):
             params["next_token"] = arguments["next_token"]
         return client.get_fields_by_loan_id(loan_id, **params)
+
+    if name == "get_fields_by_field_definition_id":
+        field_definition_id = arguments.get("field_definition_id")
+        if not field_definition_id:
+            raise HTTPException(
+                status_code=400, detail="field_definition_id is required"
+            )
+        params = {}
+        if arguments.get("next_token"):
+            params["next_token"] = arguments["next_token"]
+        return client.get_fields_by_field_definition_id(field_definition_id, **params)
 
     if name == "get_deal_files":
         deal_id = arguments.get("deal_id")
