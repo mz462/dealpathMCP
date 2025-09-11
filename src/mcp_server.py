@@ -254,7 +254,7 @@ def build_tools_list() -> dict[str, Any]:
             {
                 "name": "get_fields_by_deal_id",
                 "title": "Get Fields For Deal",
-                "description": "Returns custom fields for a deal in {fields: {data: [...], next_token}}. Items include value, name, field_definition_id, derived_field_id, optional edit_value/html_value. Supports paging via next_token or set all=true to auto-page. Example: tools/call {name:'get_fields_by_deal_id', arguments:{deal_id:'21833896', all:true}}",
+                "description": "Returns custom fields for a deal in {fields: {data: [...], next_token}}. Items include value, name, field_definition_id, derived_field_id, optional edit_value/html_value. Page via next_token. Example: tools/call {name:'get_fields_by_deal_id', arguments:{deal_id:'21833896'}}",
                 "inputSchema": {
                     "type": "object",
                     "required": ["deal_id"],
@@ -268,11 +268,7 @@ def build_tools_list() -> dict[str, Any]:
                             "type": "string",
                             "description": "Pagination token from previous response to fetch next page",
                         },
-                        "all": {
-                            "type": "boolean",
-                            "description": "If true, auto-page through all results and return a single combined list",
-                            "default": False,
-                        },
+                        
                         "non_null": {
                             "type": "boolean",
                             "description": "Only include fields with non-null values",
@@ -301,7 +297,7 @@ def build_tools_list() -> dict[str, Any]:
             {
                 "name": "get_fields_by_investment_id",
                 "title": "Get Fields For Investment",
-                "description": "Returns custom fields for an investment in {fields: {data: [...], next_token}}. Items mirror deal fields. Supports next_token or all=true. Example: {name:'get_fields_by_investment_id', arguments:{investment_id:'123', all:true}}",
+                "description": "Returns custom fields for an investment in {fields: {data: [...], next_token}}. Items mirror deal fields. Page via next_token. Example: {name:'get_fields_by_investment_id', arguments:{investment_id:'123'}}",
                 "inputSchema": {
                     "type": "object",
                     "required": ["investment_id"],
@@ -315,11 +311,7 @@ def build_tools_list() -> dict[str, Any]:
                             "type": "string",
                             "description": "Pagination token from previous response to fetch next page",
                         },
-                        "all": {
-                            "type": "boolean",
-                            "description": "If true, auto-page through all results",
-                            "default": False,
-                        },
+                        
                         "non_null": {"type": "boolean", "default": False},
                         "limit": {"type": "integer", "minimum": 1, "maximum": 1000},
                         "names_only": {"type": "boolean", "default": False},
@@ -331,7 +323,7 @@ def build_tools_list() -> dict[str, Any]:
             {
                 "name": "get_fields_by_property_id",
                 "title": "Get Fields For Property",
-                "description": "Returns custom fields for a property in {fields: {data: [...], next_token}}. Supports next_token or all=true. Example: {name:'get_fields_by_property_id', arguments:{property_id:'789', all:true}}",
+                "description": "Returns custom fields for a property in {fields: {data: [...], next_token}}. Page via next_token. Example: {name:'get_fields_by_property_id', arguments:{property_id:'789'}}",
                 "inputSchema": {
                     "type": "object",
                     "required": ["property_id"],
@@ -345,11 +337,7 @@ def build_tools_list() -> dict[str, Any]:
                             "type": "string",
                             "description": "Pagination token from previous response to fetch next page",
                         },
-                        "all": {
-                            "type": "boolean",
-                            "description": "If true, auto-page through all results",
-                            "default": False,
-                        },
+                        
                         "non_null": {"type": "boolean", "default": False},
                         "limit": {"type": "integer", "minimum": 1, "maximum": 1000},
                         "names_only": {"type": "boolean", "default": False},
@@ -361,7 +349,7 @@ def build_tools_list() -> dict[str, Any]:
             {
                 "name": "get_fields_by_asset_id",
                 "title": "Get Fields For Asset",
-                "description": "Returns custom fields for an asset in {fields: {data: [...], next_token}}. Supports next_token or all=true. Example: {name:'get_fields_by_asset_id', arguments:{asset_id:'234', all:true}}",
+                "description": "Returns custom fields for an asset in {fields: {data: [...], next_token}}. Page via next_token. Example: {name:'get_fields_by_asset_id', arguments:{asset_id:'234'}}",
                 "inputSchema": {
                     "type": "object",
                     "required": ["asset_id"],
@@ -375,11 +363,7 @@ def build_tools_list() -> dict[str, Any]:
                             "type": "string",
                             "description": "Pagination token from previous response to fetch next page",
                         },
-                        "all": {
-                            "type": "boolean",
-                            "description": "If true, auto-page through all results",
-                            "default": False,
-                        },
+                        
                         "non_null": {"type": "boolean", "default": False},
                         "limit": {"type": "integer", "minimum": 1, "maximum": 1000},
                         "names_only": {"type": "boolean", "default": False},
@@ -391,7 +375,7 @@ def build_tools_list() -> dict[str, Any]:
             {
                 "name": "get_fields_by_loan_id",
                 "title": "Get Fields For Loan",
-                "description": "Returns custom fields for a loan in {fields: {data: [...], next_token}}. Supports next_token or all=true. Example: {name:'get_fields_by_loan_id', arguments:{loan_id:'345', all:true}}",
+                "description": "Returns custom fields for a loan in {fields: {data: [...], next_token}}. Page via next_token. Example: {name:'get_fields_by_loan_id', arguments:{loan_id:'345'}}",
                 "inputSchema": {
                     "type": "object",
                     "required": ["loan_id"],
@@ -405,11 +389,7 @@ def build_tools_list() -> dict[str, Any]:
                             "type": "string",
                             "description": "Pagination token from previous response to fetch next page",
                         },
-                        "all": {
-                            "type": "boolean",
-                            "description": "If true, auto-page through all results",
-                            "default": False,
-                        },
+                        
                         "non_null": {"type": "boolean", "default": False},
                         "limit": {"type": "integer", "minimum": 1, "maximum": 1000},
                         "names_only": {"type": "boolean", "default": False},
@@ -421,7 +401,7 @@ def build_tools_list() -> dict[str, Any]:
             {
                 "name": "get_fields_by_field_definition_id",
                 "title": "Get Fields For Field Definition",
-                "description": "Returns field values + metadata for a field definition in {fields: {data: [...], next_token}}. Supports next_token or all=true. Example: {name:'get_fields_by_field_definition_id', arguments:{field_definition_id:'567', all:true}}",
+                "description": "Returns field values + metadata for a field definition in {fields: {data: [...], next_token}}. Page via next_token. Example: {name:'get_fields_by_field_definition_id', arguments:{field_definition_id:'567'}}",
                 "inputSchema": {
                     "type": "object",
                     "required": ["field_definition_id"],
@@ -435,11 +415,7 @@ def build_tools_list() -> dict[str, Any]:
                             "type": "string",
                             "description": "Pagination token from previous response to fetch next page",
                         },
-                        "all": {
-                            "type": "boolean",
-                            "description": "If true, auto-page through all results",
-                            "default": False,
-                        },
+                        
                         "non_null": {"type": "boolean", "default": False},
                         "limit": {"type": "integer", "minimum": 1, "maximum": 1000},
                         "names_only": {"type": "boolean", "default": False},
@@ -451,7 +427,7 @@ def build_tools_list() -> dict[str, Any]:
             {
                 "name": "get_file_tag_definitions",
                 "title": "List File Tag Definitions",
-                "description": "Returns a paginated list of file tag definitions: {file_tag_definitions:{data:[...],next_token}}. Supports next_token or all=true. Example: {name:'get_file_tag_definitions', arguments:{all:true}}",
+                "description": "Returns a paginated list of file tag definitions: {file_tag_definitions:{data:[...],next_token}}. Page via next_token. Example: {name:'get_file_tag_definitions'}",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -459,11 +435,7 @@ def build_tools_list() -> dict[str, Any]:
                             "type": "string",
                             "description": "Pagination token to fetch next page",
                         },
-                        "all": {
-                            "type": "boolean",
-                            "description": "If true, auto-page through all results",
-                            "default": False,
-                        },
+                        
                     },
                     "additionalProperties": False,
                 },
@@ -471,7 +443,7 @@ def build_tools_list() -> dict[str, Any]:
             {
                 "name": "get_investments",
                 "title": "List Investments",
-                "description": "Returns a paginated list of investments: {investments:{data:[...],next_token}}. Supports next_token or all=true. Example: {name:'get_investments', arguments:{all:true}}",
+                "description": "Returns a paginated list of investments: {investments:{data:[...],next_token}}. Page via next_token. Example: {name:'get_investments'}",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -479,11 +451,7 @@ def build_tools_list() -> dict[str, Any]:
                             "type": "string",
                             "description": "Pagination token to fetch next page",
                         },
-                        "all": {
-                            "type": "boolean",
-                            "description": "If true, auto-page through all results",
-                            "default": False,
-                        },
+                        
                     },
                     "additionalProperties": False,
                 },
@@ -491,7 +459,7 @@ def build_tools_list() -> dict[str, Any]:
             {
                 "name": "get_loans",
                 "title": "List Loans",
-                "description": "Returns a paginated list of loans: {loans:{data:[...],next_token}}. Supports next_token or all=true. Example: {name:'get_loans', arguments:{all:true}}",
+                "description": "Returns a paginated list of loans: {loans:{data:[...],next_token}}. Page via next_token. Example: {name:'get_loans'}",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -499,11 +467,7 @@ def build_tools_list() -> dict[str, Any]:
                             "type": "string",
                             "description": "Pagination token to fetch next page",
                         },
-                        "all": {
-                            "type": "boolean",
-                            "description": "If true, auto-page through all results",
-                            "default": False,
-                        },
+                        
                     },
                     "additionalProperties": False,
                 },
@@ -511,7 +475,7 @@ def build_tools_list() -> dict[str, Any]:
             {
                 "name": "get_people",
                 "title": "List People",
-                "description": "Returns a paginated list of people: {people:{data:[...],next_token}}. Supports next_token or all=true. Example: {name:'get_people', arguments:{all:true}}",
+                "description": "Returns a paginated list of people: {people:{data:[...],next_token}}. Page via next_token. Example: {name:'get_people'}",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -519,11 +483,7 @@ def build_tools_list() -> dict[str, Any]:
                             "type": "string",
                             "description": "Pagination token to fetch next page",
                         },
-                        "all": {
-                            "type": "boolean",
-                            "description": "If true, auto-page through all results",
-                            "default": False,
-                        },
+                        
                     },
                     "additionalProperties": False,
                 },
@@ -848,25 +808,6 @@ def tool_call_dispatch(
         params = {}
         if arguments.get("next_token"):
             params["next_token"] = arguments["next_token"]
-        if arguments.get("all"):
-            all_data = []
-            token = params.get("next_token")
-            while True:
-                page = client.get_fields_by_deal_id(deal_id, **({"next_token": token} if token else {}))
-                fields_container = page.get("fields", {})
-                all_data.extend(fields_container.get("data", []) )
-                token = fields_container.get("next_token")
-                if not token:
-                    break
-            container = {"data": all_data, "next_token": None}
-            thinned = _thin_fields_container(
-                container,
-                non_null=bool(arguments.get("non_null")),
-                limit=arguments.get("limit"),
-                names_only=bool(arguments.get("names_only")),
-                name_contains=arguments.get("name_contains"),
-            )
-            return {"fields": thinned}
         page = client.get_fields_by_deal_id(deal_id, **params)
         if any(k in arguments for k in ("non_null", "limit", "names_only", "name_contains")):
             thinned = _thin_fields_container(
@@ -886,25 +827,6 @@ def tool_call_dispatch(
         params = {}
         if arguments.get("next_token"):
             params["next_token"] = arguments["next_token"]
-        if arguments.get("all"):
-            all_data = []
-            token = params.get("next_token")
-            while True:
-                page = client.get_fields_by_investment_id(investment_id, **({"next_token": token} if token else {}))
-                fields_container = page.get("fields", {})
-                all_data.extend(fields_container.get("data", []))
-                token = fields_container.get("next_token")
-                if not token:
-                    break
-            container = {"data": all_data, "next_token": None}
-            thinned = _thin_fields_container(
-                container,
-                non_null=bool(arguments.get("non_null")),
-                limit=arguments.get("limit"),
-                names_only=bool(arguments.get("names_only")),
-                name_contains=arguments.get("name_contains"),
-            )
-            return {"fields": thinned}
         page = client.get_fields_by_investment_id(investment_id, **params)
         if any(k in arguments for k in ("non_null", "limit", "names_only", "name_contains")):
             thinned = _thin_fields_container(
@@ -924,25 +846,6 @@ def tool_call_dispatch(
         params = {}
         if arguments.get("next_token"):
             params["next_token"] = arguments["next_token"]
-        if arguments.get("all"):
-            all_data = []
-            token = params.get("next_token")
-            while True:
-                page = client.get_fields_by_property_id(property_id, **({"next_token": token} if token else {}))
-                fields_container = page.get("fields", {})
-                all_data.extend(fields_container.get("data", []))
-                token = fields_container.get("next_token")
-                if not token:
-                    break
-            container = {"data": all_data, "next_token": None}
-            thinned = _thin_fields_container(
-                container,
-                non_null=bool(arguments.get("non_null")),
-                limit=arguments.get("limit"),
-                names_only=bool(arguments.get("names_only")),
-                name_contains=arguments.get("name_contains"),
-            )
-            return {"fields": thinned}
         page = client.get_fields_by_property_id(property_id, **params)
         if any(k in arguments for k in ("non_null", "limit", "names_only", "name_contains")):
             thinned = _thin_fields_container(
@@ -962,25 +865,6 @@ def tool_call_dispatch(
         params = {}
         if arguments.get("next_token"):
             params["next_token"] = arguments["next_token"]
-        if arguments.get("all"):
-            all_data = []
-            token = params.get("next_token")
-            while True:
-                page = client.get_fields_by_asset_id(asset_id, **({"next_token": token} if token else {}))
-                fields_container = page.get("fields", {})
-                all_data.extend(fields_container.get("data", []))
-                token = fields_container.get("next_token")
-                if not token:
-                    break
-            container = {"data": all_data, "next_token": None}
-            thinned = _thin_fields_container(
-                container,
-                non_null=bool(arguments.get("non_null")),
-                limit=arguments.get("limit"),
-                names_only=bool(arguments.get("names_only")),
-                name_contains=arguments.get("name_contains"),
-            )
-            return {"fields": thinned}
         page = client.get_fields_by_asset_id(asset_id, **params)
         if any(k in arguments for k in ("non_null", "limit", "names_only", "name_contains")):
             thinned = _thin_fields_container(
@@ -1000,25 +884,6 @@ def tool_call_dispatch(
         params = {}
         if arguments.get("next_token"):
             params["next_token"] = arguments["next_token"]
-        if arguments.get("all"):
-            all_data = []
-            token = params.get("next_token")
-            while True:
-                page = client.get_fields_by_loan_id(loan_id, **({"next_token": token} if token else {}))
-                fields_container = page.get("fields", {})
-                all_data.extend(fields_container.get("data", []))
-                token = fields_container.get("next_token")
-                if not token:
-                    break
-            container = {"data": all_data, "next_token": None}
-            thinned = _thin_fields_container(
-                container,
-                non_null=bool(arguments.get("non_null")),
-                limit=arguments.get("limit"),
-                names_only=bool(arguments.get("names_only")),
-                name_contains=arguments.get("name_contains"),
-            )
-            return {"fields": thinned}
         page = client.get_fields_by_loan_id(loan_id, **params)
         if any(k in arguments for k in ("non_null", "limit", "names_only", "name_contains")):
             thinned = _thin_fields_container(
@@ -1040,25 +905,6 @@ def tool_call_dispatch(
         params = {}
         if arguments.get("next_token"):
             params["next_token"] = arguments["next_token"]
-        if arguments.get("all"):
-            all_data = []
-            token = params.get("next_token")
-            while True:
-                page = client.get_fields_by_field_definition_id(field_definition_id, **({"next_token": token} if token else {}))
-                fields_container = page.get("fields", {})
-                all_data.extend(fields_container.get("data", []))
-                token = fields_container.get("next_token")
-                if not token:
-                    break
-            container = {"data": all_data, "next_token": None}
-            thinned = _thin_fields_container(
-                container,
-                non_null=bool(arguments.get("non_null")),
-                limit=arguments.get("limit"),
-                names_only=bool(arguments.get("names_only")),
-                name_contains=arguments.get("name_contains"),
-            )
-            return {"fields": thinned}
         page = client.get_fields_by_field_definition_id(field_definition_id, **params)
         if any(k in arguments for k in ("non_null", "limit", "names_only", "name_contains")):
             thinned = _thin_fields_container(
@@ -1075,68 +921,24 @@ def tool_call_dispatch(
         params = {}
         if arguments.get("next_token"):
             params["next_token"] = arguments["next_token"]
-        if arguments.get("all"):
-            all_data = []
-            token = params.get("next_token")
-            while True:
-                page = client.get_file_tag_definitions(**({"next_token": token} if token else {}))
-                container = page.get("file_tag_definitions", {})
-                all_data.extend(container.get("data", []))
-                token = container.get("next_token")
-                if not token:
-                    break
-            return {"file_tag_definitions": {"data": all_data, "next_token": None}}
         return client.get_file_tag_definitions(**params)
 
     if name == "get_investments":
         params = {}
         if arguments.get("next_token"):
             params["next_token"] = arguments["next_token"]
-        if arguments.get("all"):
-            all_data = []
-            token = params.get("next_token")
-            while True:
-                page = client.get_investments(**({"next_token": token} if token else {}))
-                container = page.get("investments", {})
-                all_data.extend(container.get("data", []))
-                token = container.get("next_token")
-                if not token:
-                    break
-            return {"investments": {"data": all_data, "next_token": None}}
         return client.get_investments(**params)
 
     if name == "get_loans":
         params = {}
         if arguments.get("next_token"):
             params["next_token"] = arguments["next_token"]
-        if arguments.get("all"):
-            all_data = []
-            token = params.get("next_token")
-            while True:
-                page = client.get_loans(**({"next_token": token} if token else {}))
-                container = page.get("loans", {})
-                all_data.extend(container.get("data", []))
-                token = container.get("next_token")
-                if not token:
-                    break
-            return {"loans": {"data": all_data, "next_token": None}}
         return client.get_loans(**params)
 
     if name == "get_people":
         params = {}
         if arguments.get("next_token"):
             params["next_token"] = arguments["next_token"]
-        if arguments.get("all"):
-            all_data = []
-            token = params.get("next_token")
-            while True:
-                page = client.get_people(**({"next_token": token} if token else {}))
-                container = page.get("people", {})
-                all_data.extend(container.get("data", []))
-                token = container.get("next_token")
-                if not token:
-                    break
-            return {"people": {"data": all_data, "next_token": None}}
         return client.get_people(**params)
 
     if name == "get_list_options_by_field_definition_id":
