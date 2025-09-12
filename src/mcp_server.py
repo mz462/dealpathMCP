@@ -26,7 +26,13 @@ START_TIME = datetime.utcnow()
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Dealpath MCP Server (Streamable HTTP)")
-client = DealpathClient()
+try:
+    client = DealpathClient()
+except Exception:
+    logger.info(
+        "No default Dealpath API key; running in BYO-key mode (provide X-Dealpath-Key or initialize with dealpath_key)."
+    )
+    client = None  # type: ignore
 
 MCP_TOKEN = os.getenv("mcp_token")
 ALLOWED_ORIGINS = {
@@ -140,7 +146,7 @@ def cleanup_expired_sessions(max_age_hours: int = 24):
     return len(expired)
 
 
-def get_dealpath_client_for_session(session: Optional[dict[str, Any]]) -> DealpathClient:
+def get_dealpath_client_for_session(session: Optional[dict[str, Any]]) -> Optional[DealpathClient]:
     """Return a DealpathClient using session-specific key if provided; otherwise global client.
 
     The session key is never logged and only kept in-process for the session lifetime.
@@ -865,6 +871,11 @@ def tool_call_dispatch(
     name: str, arguments: dict[str, Any], *, base_url: Optional[str] = None, dp: Optional[DealpathClient] = None
 ) -> Any:
     upstream = dp or client
+    if upstream is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Dealpath API key required. Provide X-Dealpath-Key header or initialize with dealpath_key.",
+        )
     if name == "search_deals":
         query = (arguments.get("query") or "").strip()
         if not query:
@@ -1225,6 +1236,11 @@ def _search_deals_impl(
     """
     # Fetch a wider window then filter locally; clamp to 1000
     upstream = dp or client
+    if upstream is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Dealpath API key required. Provide X-Dealpath-Key header or initialize with dealpath_key.",
+        )
     try:
         deals_envelope = upstream.get_deals(limit=1000)
     except Exception as e:
@@ -1485,6 +1501,12 @@ async def mcp_http_endpoint(
                     return mcp_response_error(req_id, -32602, "Missing uri")
                 kind, value = _parse_dealpath_uri(uri)
                 dp_client = get_dealpath_client_for_session(session)
+                if dp_client is None:
+                    return mcp_response_error(
+                        req_id,
+                        401,
+                        "Dealpath API key required. Provide X-Dealpath-Key header or initialize with dealpath_key.",
+                    )
                 if kind == "deal_json":
                     cache_key = f"deal_json:{value}"
                     data = cache.get(cache_key)
