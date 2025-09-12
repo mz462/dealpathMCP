@@ -84,6 +84,56 @@ Response shape (abridged):
 }
 ```
 
+### Example: tools/call (search_deals by name/address)
+
+```
+curl -s \
+  -H "Authorization: Bearer $MCP_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+        "jsonrpc":"2.0",
+        "id":"s1",
+        "method":"tools/call",
+        "params":{ "name":"search_deals", "arguments": {"query":"boston"} }
+      }' \
+  http://127.0.0.1:8000/mcp | jq
+```
+
+Returns only deals matched by name/address; no metrics.
+
+### HTTP search endpoint
+
+For quick, non-MCP usage, a simple search route mirrors the MCP search tool but returns JSON directly:
+
+```
+GET /mcp/search?query=<text>&updated_after=<iso8601>&limit=<1-200>
+```
+
+Notes:
+- Filters locally across deal name/address only; no portfolio metrics.
+- `updated_after` is optional ISO 8601; `limit` defaults to 50 (max 200).
+
+### MCP Resources
+
+Supports MCP resource templates for direct reads:
+- `dealpath://deal/{deal_id}.json` (application/json)
+- `dealpath://deal/{deal_id}.md` (text/markdown)
+- `dealpath://search/{query}.json` (application/json)
+
+List templates:
+```
+curl -s -H "Authorization: Bearer $MCP_TOKEN" -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":"r1","method":"resources/list"}' \
+  http://127.0.0.1:8000/mcp | jq
+```
+
+Read a resource:
+```
+curl -s -H "Authorization: Bearer $MCP_TOKEN" -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":"r2","method":"resources/read","params":{"uri":"dealpath://deal/12345.md"}}' \
+  http://127.0.0.1:8000/mcp | jq -r .result.contents[0].text
+```
+
 ## Key Learnings & API Details
 
 During the development of this server, the following key details about the Dealpath API were discovered:

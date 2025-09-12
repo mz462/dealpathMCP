@@ -3,9 +3,9 @@ import logging
 import os
 import pathlib
 import re
-from collections import Counter
+from collections import Counter, defaultdict
 from datetime import datetime, timedelta
-from typing import Any, Optional, Union
+from typing import Any, Optional, Union, Callable, Tuple
 
 import requests
 from dotenv import load_dotenv
@@ -41,8 +41,63 @@ FILE_STORAGE_DIR = os.getenv(
     "file_storage_dir", os.path.join(os.getcwd(), "local_files")
 )
 
+# --- Lightweight TTL cache -------------------------------------------------
+
+class TTLCache:
+    """Very small in-memory TTL cache for hot items (deals, summaries).
+
+    Not for persistence; just to reduce latency and API calls during a session.
+    """
+
+    def __init__(self, default_ttl_seconds: int = 300):
+        self.default_ttl = default_ttl_seconds
+        self._store: dict[str, tuple[datetime, Any]] = {}
+
+    def get(self, key: str) -> Optional[Any]:
+        item = self._store.get(key)
+        if not item:
+            return None
+        expires_at, value = item
+        if datetime.utcnow() >= expires_at:
+            self._store.pop(key, None)
+            return None
+        return value
+
+    def set(self, key: str, value: Any, ttl_seconds: Optional[int] = None) -> None:
+        ttl = ttl_seconds if ttl_seconds is not None else self.default_ttl
+        self._store[key] = (datetime.utcnow() + timedelta(seconds=ttl), value)
+
+
+# Small caches scoped to process
+cache = TTLCache(default_ttl_seconds=int(os.getenv("CACHE_TTL_SECONDS", "180")))
+md_cache = TTLCache(default_ttl_seconds=int(os.getenv("MD_CACHE_TTL_SECONDS", "180")))
+
 # Session management for Streamable HTTP transport
 sessions: dict[str, dict[str, Any]] = {}
+
+# Tool call metrics (lightweight in-memory counters)
+TOOL_METRICS: dict[str, Any] = {
+    "calls_total": 0,
+    "errors_total": 0,
+    "by_name": defaultdict(lambda: {"calls": 0, "errors": 0, "total_latency_ms": 0, "count": 0}),
+}
+
+
+def _record_tool_call(name: str, duration_ms: Optional[int] = None, error: bool = False) -> None:
+    """Record a tool call result into in-memory metrics."""
+    try:
+        TOOL_METRICS["calls_total"] += 1
+        bucket = TOOL_METRICS["by_name"][name]
+        bucket["calls"] += 1
+        if duration_ms is not None:
+            bucket["total_latency_ms"] += int(duration_ms)
+            bucket["count"] += 1
+        if error:
+            TOOL_METRICS["errors_total"] += 1
+            bucket["errors"] += 1
+    except Exception:
+        # Never let metrics recording affect request flow
+        pass
 
 
 def create_session() -> str:
@@ -202,6 +257,35 @@ def build_tools_list() -> dict[str, Any]:
     return {
         "tools": [
             {
+                "name": "search_deals",
+                "title": "Search Deals (name/address)",
+                "description": "Case-insensitive contains search across deal name and address fields. Returns {deals:{data:[...],next_token}} only; no metrics.",
+                "inputSchema": {
+                    "type": "object",
+                    "required": ["query"],
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "Free-text query matched against name and address",
+                            "minLength": 1,
+                            "maxLength": 200,
+                        },
+                        "updated_after": {
+                            "type": "string",
+                            "format": "date-time",
+                            "description": "Optional ISO 8601 filter on last_updated",
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 200,
+                            "default": 50,
+                        },
+                    },
+                    "additionalProperties": False,
+                },
+            },
+            {
                 "name": "get_deals",
                 "title": "List Deals",
                 "description": "Retrieve deals from Dealpath with optional filters for status and property type. Includes local propertyType filtering when API-side filtering is unavailable. Returns paginated results with deal metadata.",
@@ -242,6 +326,12 @@ def build_tools_list() -> dict[str, Any]:
                 },
             },
             {
+                "name": "describe_schema",
+                "title": "Describe Schema",
+                "description": "Return field definitions normalized to {field_definitions:{data:[...],next_token}} for safer planning.",
+                "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+            },
+            {
                 "name": "get_deal",
                 "title": "Get Deal Details",
                 "description": "Returns a single deal in a nested object: {deal: {data: <deal>, next_token: null}}. Use the ID from get_deals.",
@@ -261,7 +351,7 @@ def build_tools_list() -> dict[str, Any]:
             {
                 "name": "get_fields_by_deal_id",
                 "title": "Get Fields For Deal",
-                "description": "Returns custom fields for a deal in {fields: {data: [...], next_token}}. Items include value, name, field_definition_id, derived_field_id, optional edit_value/html_value. Page via next_token. Example: tools/call {name:'get_fields_by_deal_id', arguments:{deal_id:'21833896'}}",
+                "description": "Returns {fields:{data:[{name:string, value:any, field_definition_id:number, derived_field_id:number, edit_value?:any, html_value?:string}], next_token?:string|null}} for a deal. Filters: non_null (drop null/empty), names_only ({name,value} only), name_contains (array of substrings, case-insensitive), limit (applied after filters). Paginate via next_token; no auto-pagination.",
                 "inputSchema": {
                     "type": "object",
                     "required": ["deal_id"],
@@ -304,7 +394,7 @@ def build_tools_list() -> dict[str, Any]:
             {
                 "name": "get_fields_by_investment_id",
                 "title": "Get Fields For Investment",
-                "description": "Returns custom fields for an investment in {fields: {data: [...], next_token}}. Items mirror deal fields. Page via next_token. Example: {name:'get_fields_by_investment_id', arguments:{investment_id:'123'}}",
+                "description": "Returns {fields:{data:[{name:string, value:any, field_definition_id:number, derived_field_id:number, edit_value?:any, html_value?:string}], next_token?:string|null}} for an investment. Same filters and pagination as get_fields_by_deal_id.",
                 "inputSchema": {
                     "type": "object",
                     "required": ["investment_id"],
@@ -330,7 +420,7 @@ def build_tools_list() -> dict[str, Any]:
             {
                 "name": "get_fields_by_property_id",
                 "title": "Get Fields For Property",
-                "description": "Returns custom fields for a property in {fields: {data: [...], next_token}}. Page via next_token. Example: {name:'get_fields_by_property_id', arguments:{property_id:'789'}}",
+                "description": "Returns {fields:{data:[{name:string, value:any, field_definition_id:number, derived_field_id:number, edit_value?:any, html_value?:string}], next_token?:string|null}} for a property. Filters/pagination identical to get_fields_by_deal_id.",
                 "inputSchema": {
                     "type": "object",
                     "required": ["property_id"],
@@ -356,7 +446,7 @@ def build_tools_list() -> dict[str, Any]:
             {
                 "name": "get_fields_by_asset_id",
                 "title": "Get Fields For Asset",
-                "description": "Returns custom fields for an asset in {fields: {data: [...], next_token}}. Page via next_token. Example: {name:'get_fields_by_asset_id', arguments:{asset_id:'234'}}",
+                "description": "Returns {fields:{data:[{name:string, value:any, field_definition_id:number, derived_field_id:number, edit_value?:any, html_value?:string}], next_token?:string|null}} for an asset. Filters/pagination identical to get_fields_by_deal_id.",
                 "inputSchema": {
                     "type": "object",
                     "required": ["asset_id"],
@@ -382,7 +472,7 @@ def build_tools_list() -> dict[str, Any]:
             {
                 "name": "get_fields_by_loan_id",
                 "title": "Get Fields For Loan",
-                "description": "Returns custom fields for a loan in {fields: {data: [...], next_token}}. Page via next_token. Example: {name:'get_fields_by_loan_id', arguments:{loan_id:'345'}}",
+                "description": "Returns {fields:{data:[{name:string, value:any, field_definition_id:number, derived_field_id:number, edit_value?:any, html_value?:string}], next_token?:string|null}} for a loan. Filters/pagination identical to get_fields_by_deal_id.",
                 "inputSchema": {
                     "type": "object",
                     "required": ["loan_id"],
@@ -408,7 +498,7 @@ def build_tools_list() -> dict[str, Any]:
             {
                 "name": "get_fields_by_field_definition_id",
                 "title": "Get Fields For Field Definition",
-                "description": "Returns field values + metadata for a field definition in {fields: {data: [...], next_token}}. Page via next_token. Example: {name:'get_fields_by_field_definition_id', arguments:{field_definition_id:'567'}}",
+                "description": "Returns {fields:{data:[{name:string, value:any, field_definition_id:number, derived_field_id:number, edit_value?:any, html_value?:string}], next_token?:string|null}} for a field definition across records. Filters/pagination identical to get_fields_by_deal_id.",
                 "inputSchema": {
                     "type": "object",
                     "required": ["field_definition_id"],
@@ -757,6 +847,15 @@ def _absolute_local_url(base_url: str, relpath: str) -> str:
 def tool_call_dispatch(
     name: str, arguments: dict[str, Any], *, base_url: Optional[str] = None
 ) -> Any:
+    if name == "search_deals":
+        query = (arguments.get("query") or "").strip()
+        if not query:
+            raise HTTPException(status_code=400, detail="query is required")
+        updated_after = arguments.get("updated_after")
+        limit = arguments.get("limit") or 50
+        result = _search_deals_impl(query=query, updated_after=updated_after, limit=limit)
+        return result
+
     if name == "get_deals":
         status_val = arguments.get("status")
         property_type = arguments.get("propertyType")
@@ -826,6 +925,14 @@ def tool_call_dispatch(
             )
             return {"fields": thinned}
         return page
+
+    if name == "describe_schema":
+        # Normalize to {field_definitions: {data, next_token}}
+        raw = client.get_field_definitions()
+        container = raw.get("field_definitions") if isinstance(raw, dict) else None
+        if not isinstance(container, dict):
+            container = {"data": [], "next_token": None}
+        return {"field_definitions": container}
 
     if name == "get_fields_by_investment_id":
         investment_id = arguments.get("investment_id")
@@ -1091,6 +1198,56 @@ def tool_call_dispatch(
     raise HTTPException(status_code=404, detail=f"Unknown tool: {name}")
 
 
+def _search_deals_impl(*, query: str, updated_after: Optional[str] = None, limit: int = 50) -> dict[str, Any]:
+    """Local search across deals: name/address contains query.
+
+    This avoids returning metrics and keeps scope to deals only.
+    """
+    # Fetch a wider window then filter locally; clamp to 1000
+    try:
+        deals_envelope = client.get_deals(limit=1000)
+    except Exception as e:
+        # Surface errors consistently
+        raise HTTPException(status_code=502, detail=f"Failed to fetch deals: {e}")
+
+    deals = deals_envelope.get("deals", {}).get("data", [])
+
+    q = query.lower()
+
+    def text(v: Any) -> str:
+        return str(v or "").lower()
+
+    def addr_str(d: dict[str, Any]) -> str:
+        a = d.get("address") or {}
+        parts = [a.get("line1"), a.get("city"), a.get("state"), a.get("country")]
+        return " ".join([str(p) for p in parts if p])
+
+    filtered: list[dict[str, Any]] = []
+    cutoff = None
+    if updated_after:
+        try:
+            cutoff = datetime.fromisoformat(updated_after.replace("Z", ""))
+        except Exception:
+            cutoff = None
+
+    for d in deals:
+        name = text(d.get("name") or d.get("title"))
+        address = text(addr_str(d))
+        if q in name or q in address:
+            if cutoff is not None:
+                lu = d.get("last_updated") or d.get("updated_at")
+                try:
+                    if lu and datetime.fromisoformat(str(lu).replace("Z", "")) <= cutoff:
+                        continue
+                except Exception:
+                    pass
+            filtered.append(d)
+        if len(filtered) >= limit:
+            break
+
+    return {"deals": {"data": filtered, "next_token": None}}
+
+
 def to_content_parts(value: Any) -> list[dict[str, Any]]:
     """Convert a Python value to MCP content parts array.
 
@@ -1108,6 +1265,79 @@ def to_content_parts(value: Any) -> list[dict[str, Any]]:
         text = str(value)
 
     return [{"type": "text", "text": text}]
+
+
+# --- MCP Resources & Prompts ----------------------------------------------
+
+def build_resource_templates() -> list[dict[str, Any]]:
+    return [
+        {
+            "name": "Deal JSON",
+            "uriTemplate": "dealpath://deal/{deal_id}.json",
+            "mimeType": "application/json",
+            "description": "Canonical JSON for a single deal",
+        },
+        {
+            "name": "Deal Summary",
+            "uriTemplate": "dealpath://deal/{deal_id}.md",
+            "mimeType": "text/markdown",
+            "description": "Compact markdown summary of a deal",
+        },
+        {
+            "name": "Search Deals JSON",
+            "uriTemplate": "dealpath://search/{query}.json",
+            "mimeType": "application/json",
+            "description": "Search deals by name/address and return JSON list",
+        },
+    ]
+
+
+def _parse_dealpath_uri(uri: str) -> Tuple[str, str]:
+    """Parse a dealpath:// URI and return (kind, value).
+
+    kind: 'deal_json' | 'deal_md' | 'search_json'
+    value: id or query
+    """
+    if not uri.startswith("dealpath://"):
+        raise HTTPException(status_code=400, detail="Unsupported URI scheme")
+    body = uri[len("dealpath://") :]
+    if body.startswith("deal/") and body.endswith(".json"):
+        return ("deal_json", body[len("deal/") : -len(".json")])
+    if body.startswith("deal/") and body.endswith(".md"):
+        return ("deal_md", body[len("deal/") : -len(".md")])
+    if body.startswith("search/") and body.endswith(".json"):
+        return ("search_json", body[len("search/") : -len(".json")])
+    raise HTTPException(status_code=404, detail="Resource not found")
+
+
+def _deal_markdown(deal: dict[str, Any]) -> str:
+    name = deal.get("name") or deal.get("title") or f"Deal {deal.get('id','?')}"
+    deal_id = deal.get("id") or deal.get("deal_id")
+    state = deal.get("deal_state") or deal.get("status")
+    dtype = deal.get("deal_type") or deal.get("type")
+    last_updated = deal.get("last_updated") or deal.get("updated_at")
+    addr = deal.get("address") or {}
+    addr_str = ", ".join(
+        [
+            s
+            for s in [addr.get("line1"), addr.get("city"), addr.get("state"), addr.get("country")]
+            if s
+        ]
+    )
+    lines = [
+        f"# {name}",
+        "",
+        f"- ID: {deal_id}",
+        f"- Stage: {state}",
+        f"- Type: {dtype}",
+        f"- Address: {addr_str}" if addr_str else "- Address: (none)",
+        f"- Last Updated: {last_updated}" if last_updated else "- Last Updated: (unknown)",
+    ]
+    # Key dates if present
+    for k in ("loi_date", "ic_date", "close_date"):
+        if deal.get(k):
+            lines.append(f"- {k.replace('_',' ').title()}: {deal[k]}")
+    return "\n".join(lines) + "\n"
 
 
 @app.post("/mcp")
@@ -1156,8 +1386,8 @@ async def mcp_http_endpoint(
                     "protocolVersion": SUPPORTED_PROTOCOL_VERSION,
                     "capabilities": {
                         "tools": {"listChanged": False},
-                        "resources": {},
-                        "prompts": {},
+                        "resources": {"listChanged": False},
+                        "prompts": {"listChanged": False},
                         "logging": {},
                     },
                     "serverInfo": {
@@ -1192,12 +1422,201 @@ async def mcp_http_endpoint(
                     f"Tool call: {name} with args: {list(arguments.keys())} [session: {mcp_session_id}]"
                 )
 
-                result = tool_call_dispatch(name, arguments, base_url=base_url)
+                # Metrics instrumentation around tool call
+                import time as _time
+                _start = _time.time()
+                try:
+                    result = tool_call_dispatch(name, arguments, base_url=base_url)
+                except HTTPException as http_exc:
+                    _record_tool_call(name, duration_ms=int((_time.time() - _start) * 1000), error=True)
+                    raise http_exc
+                except Exception:
+                    _record_tool_call(name, duration_ms=int((_time.time() - _start) * 1000), error=True)
+                    raise
+                else:
+                    _record_tool_call(name, duration_ms=int((_time.time() - _start) * 1000), error=False)
                 if isinstance(result, dict) and "__content__" in result:
                     parts = result["__content__"]
                 else:
                     parts = to_content_parts(result)
                 return mcp_response_ok(req_id, {"content": parts})
+
+            if method in ("resources/list", "resources.list"):
+                return mcp_response_ok(
+                    req_id, {"resources": [], "resourceTemplates": build_resource_templates()}
+                )
+
+            if method in ("resources/read", "resources.read"):
+                uri = params.get("uri")
+                if not uri:
+                    return mcp_response_error(req_id, -32602, "Missing uri")
+                kind, value = _parse_dealpath_uri(uri)
+                if kind == "deal_json":
+                    cache_key = f"deal_json:{value}"
+                    data = cache.get(cache_key)
+                    if data is None:
+                        data = client.get_deal_by_id(value)
+                        cache.set(cache_key, data)
+                    text = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+                    return mcp_response_ok(
+                        req_id,
+                        {
+                            "contents": [
+                                {
+                                    "uri": uri,
+                                    "mimeType": "application/json",
+                                    "text": text,
+                                }
+                            ]
+                        },
+                    )
+                if kind == "deal_md":
+                    cache_key = f"deal_md:{value}"
+                    md = md_cache.get(cache_key)
+                    if md is None:
+                        deal_obj = cache.get(f"deal_json:{value}") or client.get_deal_by_id(
+                            value
+                        )
+                        # normalize deal dict from nested envelope if needed
+                        deal = (
+                            deal_obj.get("deal", {}).get("data")
+                            if isinstance(deal_obj, dict)
+                            else None
+                        ) or deal_obj
+                        md = _deal_markdown(deal)
+                        md_cache.set(cache_key, md)
+                    return mcp_response_ok(
+                        req_id,
+                        {
+                            "contents": [
+                                {
+                                    "uri": uri,
+                                    "mimeType": "text/markdown",
+                                    "text": md,
+                                }
+                            ]
+                        },
+                    )
+                if kind == "search_json":
+                    query = requests.utils.unquote(value)
+                    result = _search_deals_impl(query=query, limit=50)
+                    text = json.dumps(result, ensure_ascii=False, separators=(",", ":"))
+                    return mcp_response_ok(
+                        req_id,
+                        {
+                            "contents": [
+                                {
+                                    "uri": uri,
+                                    "mimeType": "application/json",
+                                    "text": text,
+                                }
+                            ]
+                        },
+                    )
+
+            if method in ("prompts/list", "prompts.list"):
+                return mcp_response_ok(
+                    req_id,
+                    {
+                        "prompts": [
+                            {
+                                "name": "ask_about_deal",
+                                "description": "Prefer get_deal and get_fields_by_deal_id; never invent missing fields.",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {"deal_id": {"type": "string"}},
+                                },
+                            },
+                            {
+                                "name": "summarize_pipeline",
+                                "description": "Summarize deals grouped by stage/market/owner.",
+                                "inputSchema": {"type": "object", "properties": {}},
+                            },
+                            {
+                                "name": "inspect_fields",
+                                "description": "Safely explore custom fields using filters (non_null, names_only, name_contains, limit) and pagination.",
+                                "inputSchema": {"type": "object", "properties": {}},
+                            },
+                        ]
+                    },
+                )
+
+            if method in ("prompts/get", "prompts.get"):
+                name = params.get("name")
+                if not name:
+                    return mcp_response_error(req_id, -32602, "Missing prompt name")
+                if name == "ask_about_deal":
+                    return mcp_response_ok(
+                        req_id,
+                        {
+                            "messages": [
+                                {
+                                    "role": "system",
+                                    "content": [
+                                        {
+                                            "type": "text",
+                                            "text": (
+                                                "Use structured tools first: get_deal (core) and get_fields_by_deal_id (custom fields). "
+                                                "Warning: get_fields_by_* can return many items (including long text, HTML snippets, lists, and linked IDs). "
+                                                "Start with filters to control size: non_null:true, names_only:true, name_contains:[""risk"", ""milestone"", ...], limit:25. "
+                                                "If more is needed, paginate with next_token. Do not request all fields without filters. "
+                                                "If tools are insufficient for summarization, you may read dealpath://deal/{deal_id}.md."
+                                            ),
+                                        }
+                                    ],
+                                }
+                            ]
+                        },
+                    )
+                if name == "summarize_pipeline":
+                    return mcp_response_ok(
+                        req_id,
+                        {
+                            "messages": [
+                                {
+                                    "role": "system",
+                                    "content": [
+                                        {
+                                            "type": "text",
+                                            "text": (
+                                                "Group by stage, market, and owner. Prefer structured fields."
+                                            ),
+                                        }
+                                    ],
+                                }
+                            ]
+                        },
+                    )
+                if name == "inspect_fields":
+                    return mcp_response_ok(
+                        req_id,
+                        {
+                            "messages": [
+                                {
+                                    "role": "system",
+                                    "content": [
+                                        {
+                                            "type": "text",
+                                            "text": (
+                                                "To explore custom fields without overwhelming the model, always start scoped: "
+                                                "Use get_fields_by_deal_id (or *_by_property_id / *_by_asset_id / *_by_loan_id) with filters.\n"
+                                                "- Set non_null:true to drop empty values.\n"
+                                                "- Use names_only:true for compact {name,value}.\n"
+                                                "- Use name_contains:[\"risk\",\"milestone\",\"debt\"] to target relevant fields (case-insensitive).\n"
+                                                "- Set limit (e.g., 25) and then page with next_token if needed.\n\n"
+                                                "Examples (tools/call):\n"
+                                                "- {name: get_fields_by_deal_id, arguments: {deal_id: \"<ID>\", non_null: true, names_only: true, limit: 25}}\n"
+                                                "- {name: get_fields_by_deal_id, arguments: {deal_id: \"<ID>\", name_contains: [\"risk\", \"covenant\"], non_null: true, names_only: true, limit: 20}}\n"
+                                                "- {name: get_fields_by_deal_id, arguments: {deal_id: \"<ID>\", next_token: \"<from previous page>\", names_only: true, limit: 25}}\n\n"
+                                                "Warning: get_fields_by_* may include long text, HTML snippets (html_value), and linked IDs; avoid requesting everything at once."
+                                            ),
+                                        }
+                                    ],
+                                }
+                            ]
+                        },
+                    )
+                return mcp_response_error(req_id, 404, f"Unknown prompt: {name}")
 
             if method == "ping":
                 return mcp_response_ok(
@@ -1668,7 +2087,9 @@ def get_folders_by_asset_id_endpoint(asset_id: int):
         folders = client.get_folders_by_asset_id(asset_id)
         return folders
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(
+            status_code=500, detail={"code": "upstream_error", "message": str(e)}
+        )
 
 
 @app.get("/mcp/getInvestments")
@@ -1694,7 +2115,9 @@ def get_investments_endpoint(
         investments = client.get_investments(**params)
         return investments
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(
+            status_code=500, detail={"code": "upstream_error", "message": str(e)}
+        )
 
 
 @app.get("/mcp/getListOptionsByFieldDefinitionId/{field_definition_id}")
@@ -1714,7 +2137,9 @@ def get_list_options_by_field_definition_id_endpoint(field_definition_id: str):
         )
         return list_options
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(
+            status_code=500, detail={"code": "upstream_error", "message": str(e)}
+        )
 
 
 @app.get("/mcp/getLoans")
@@ -1738,7 +2163,9 @@ def get_loans_endpoint(page: Optional[int] = None, per_page: Optional[int] = Non
         loans = client.get_loans(**params)
         return loans
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(
+            status_code=500, detail={"code": "upstream_error", "message": str(e)}
+        )
 
 
 @app.get("/mcp/getPeople")
@@ -1762,7 +2189,9 @@ def get_people_endpoint(page: Optional[int] = None, per_page: Optional[int] = No
         people = client.get_people(**params)
         return people
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(
+            status_code=500, detail={"code": "upstream_error", "message": str(e)}
+        )
 
 
 @app.get("/mcp/getPropertyById/{property_id}")
@@ -1780,7 +2209,9 @@ def get_property_by_id_endpoint(property_id: str):
         property_data = client.get_property_by_id(property_id)
         return property_data
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(
+            status_code=500, detail={"code": "upstream_error", "message": str(e)}
+        )
 
 
 @app.get("/mcp/getProperties")
@@ -1804,7 +2235,9 @@ def get_properties_endpoint(page: Optional[int] = None, per_page: Optional[int] 
         properties = client.get_properties(**params)
         return properties
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(
+            status_code=500, detail={"code": "upstream_error", "message": str(e)}
+        )
 
 
 @app.get("/mcp/getRolesByDealId/{deal_id}")
@@ -1822,7 +2255,9 @@ def get_roles_by_deal_id_endpoint(deal_id: str):
         roles = client.get_roles_by_deal_id(deal_id)
         return roles
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(
+            status_code=500, detail={"code": "upstream_error", "message": str(e)}
+        )
 
 
 @app.get("/mcp/getRolesByAssetId/{asset_id}")
@@ -1840,11 +2275,17 @@ def get_roles_by_asset_id_endpoint(asset_id: str):
         roles = client.get_roles_by_asset_id(asset_id)
         return roles
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(
+            status_code=500, detail={"code": "upstream_error", "message": str(e)}
+        )
 
 
 @app.get("/mcp/search")
-def search_endpoint(query: str):
+def search_endpoint(
+    query: str,
+    updated_after: Optional[str] = Query(None, description="ISO 8601 timestamp filter"),
+    limit: int = Query(50, ge=1, le=200, description="Max results to return (<=200)"),
+):
     """
     Performs a global search across the Dealpath environment.
 
@@ -1855,10 +2296,12 @@ def search_endpoint(query: str):
         A JSON object containing the search results.
     """
     try:
-        search_results = client.search(query=query)
-        return search_results
+        # Align with MCP search tool: local search across deals only
+        return _search_deals_impl(query=query, updated_after=updated_after, limit=limit)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(
+            status_code=500, detail={"code": "search_failed", "message": str(e)}
+        )
 
 
 # --- Health Check and Monitoring Endpoints (2025 standards) ---
@@ -1915,6 +2358,19 @@ def metrics_endpoint():
     # Clean up expired sessions before reporting
     cleaned_sessions = cleanup_expired_sessions()
 
+    # Snapshot tool metrics into JSON-serializable structure
+    by_name: dict[str, Any] = {}
+    try:
+        for k, v in TOOL_METRICS["by_name"].items():
+            avg_latency_ms = (v["total_latency_ms"] / v["count"]) if v["count"] else None
+            by_name[k] = {
+                "calls": v["calls"],
+                "errors": v["errors"],
+                "avg_latency_ms": avg_latency_ms,
+            }
+    except Exception:
+        by_name = {}
+
     return {
         "mcp_server": {
             "version": "0.2.0",
@@ -1940,6 +2396,11 @@ def metrics_endpoint():
             "file_storage_dir": FILE_STORAGE_DIR,
             "auth_enabled": MCP_TOKEN is not None,
             "allowed_origins": list(ALLOWED_ORIGINS),
+        },
+        "tools": {
+            "calls_total": TOOL_METRICS.get("calls_total", 0),
+            "errors_total": TOOL_METRICS.get("errors_total", 0),
+            "by_name": by_name,
         },
     }
 
