@@ -25,9 +25,10 @@ RETRY_STRATEGY = Retry(
 
 
 class DealpathClient:
-    def __init__(self):
+    def __init__(self, api_key: str | None = None):
         self.log = logging.getLogger(__name__ + ".DealpathClient")
-        if not DEALPATH_API_KEY:
+        key = api_key or DEALPATH_API_KEY
+        if not key:
             raise RuntimeError(
                 "Missing Dealpath API key. Set 'dealpath_key' in environment/.env."
             )
@@ -38,7 +39,7 @@ class DealpathClient:
         self.session.mount("https://", adapter)
         self.session.mount("http://", adapter)
         self.headers = {
-            "Authorization": f"Bearer {DEALPATH_API_KEY}",
+            "Authorization": f"Bearer {key}",
             "Accept": "application/vnd.dealpath.api.v1+json",
         }
         self.session.headers.update(self.headers)

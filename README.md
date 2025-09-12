@@ -113,6 +113,46 @@ Notes:
 - Filters locally across deal name/address only; no portfolio metrics.
 - `updated_after` is optional ISO 8601; `limit` defaults to 50 (max 200).
 
+## Bring Your Own Dealpath Key (BYO)
+
+In production, you can let each client supply their own Dealpath API key instead of configuring a server-wide key. The server never persists or logs these keys; they live only in memory for the session/request.
+
+- MCP initialize: include the key via either header or param
+  - Header: `X-Dealpath-Key: <user_api_key>`
+  - Body param: `{ "method":"initialize", "params": { "dealpath_key": "<user_api_key>" } }`
+  - The key is stored in the MCP session (referenced by `Mcp-Session-Id`) and used for subsequent `tools/call` and `resources/read` in that session.
+
+- MCP REST helpers: include per-request header
+  - Example: `GET /mcp/search?query=boston` with `X-Dealpath-Key: <user_api_key>`
+  - Works for other `GET /mcp/*` helpers like `/mcp/getPeople`, `/mcp/getLoans`, etc.
+
+Security notes
+- Keep `mcp_token` set and serve over HTTPS in production.
+- Do not log request headers. This server already avoids logging secrets.
+- Keys are cleared automatically with session cleanup; they are never written to disk.
+
+## Desktop Extensions (.mcpb)
+
+You can use this server with Claude Desktop via a remote-only MCP bundle (no server code embedded).
+
+- Bundle provided: `bundle/dealpath-remote` (remote connector using `mcp-remote`).
+- Update `bundle/dealpath-remote/manifest.json` and set your deployed URL (HTTPS), e.g. `https://api.example.com/mcp`.
+- Provide secrets via environment variables so they are not stored in the bundle:
+  - `export MCP_TOKEN=<server mcp_token>`
+  - `export DEALPATH_KEY=<your Dealpath API key>`
+- The manifest injects headers for every call via `MCP_REMOTE_HEADERS`:
+  - `Authorization: Bearer ${env:MCP_TOKEN}`
+  - `X-Dealpath-Key: ${env:DEALPATH_KEY}`
+
+Build and install
+- Build the bundle file: `./scripts/make_mcpb.sh` → outputs `dealpath-remote.mcpb` at repo root.
+- Install: drag-drop the `.mcpb` into Claude Desktop Extensions (or “Install from file”).
+- Ensure Claude Desktop is launched with the env vars above so the headers resolve.
+
+Notes
+- This approach keeps the server deployable independently; the `.mcpb` only points to it.
+- Always deploy behind TLS and keep `mcp_token` enabled in production.
+
 ### MCP Resources
 
 Supports MCP resource templates for direct reads:

@@ -108,6 +108,9 @@ def create_session() -> str:
         "last_accessed": datetime.utcnow(),
         "protocol_version": SUPPORTED_PROTOCOL_VERSION,
         "initialized": False,
+        # Optionally stores a per-session Dealpath API key (BYO key). Not persisted.
+        # Key is accepted at initialize via header X-Dealpath-Key or params.dealpath_key.
+        "dealpath_key": None,
     }
     logger.info(f"Created new MCP session: {session_id}")
     return session_id
@@ -135,6 +138,20 @@ def cleanup_expired_sessions(max_age_hours: int = 24):
         logger.info(f"Cleaned up expired session: {session_id}")
 
     return len(expired)
+
+
+def get_dealpath_client_for_session(session: Optional[dict[str, Any]]) -> DealpathClient:
+    """Return a DealpathClient using session-specific key if provided; otherwise global client.
+
+    The session key is never logged and only kept in-process for the session lifetime.
+    """
+    try:
+        if session and session.get("dealpath_key"):
+            return DealpathClient(api_key=session["dealpath_key"])  # ephemeral client
+    except Exception:
+        # Fall back to global client on any error constructing per-session client
+        pass
+    return client
 
 
 if not MCP_TOKEN:
@@ -845,15 +862,16 @@ def _absolute_local_url(base_url: str, relpath: str) -> str:
 
 
 def tool_call_dispatch(
-    name: str, arguments: dict[str, Any], *, base_url: Optional[str] = None
+    name: str, arguments: dict[str, Any], *, base_url: Optional[str] = None, dp: Optional[DealpathClient] = None
 ) -> Any:
+    upstream = dp or client
     if name == "search_deals":
         query = (arguments.get("query") or "").strip()
         if not query:
             raise HTTPException(status_code=400, detail="query is required")
         updated_after = arguments.get("updated_after")
         limit = arguments.get("limit") or 50
-        result = _search_deals_impl(query=query, updated_after=updated_after, limit=limit)
+        result = _search_deals_impl(query=query, updated_after=updated_after, limit=limit, dp=dp)
         return result
 
     if name == "get_deals":
@@ -869,7 +887,7 @@ def tool_call_dispatch(
         if limit is not None:
             filters["limit"] = limit
 
-        result = client.get_deals(**filters)
+        result = upstream.get_deals(**filters)
 
         # If a propertyType filter is provided, apply a safe local filter on the
         # returned payload (deal.deal_type) to ensure the behavior users expect.
@@ -896,7 +914,7 @@ def tool_call_dispatch(
         if not deal_id:
             raise HTTPException(status_code=400, detail="deal_id is required")
         try:
-            return client.get_deal_by_id(deal_id)
+            return upstream.get_deal_by_id(deal_id)
         except requests.HTTPError as http_err:
             resp = http_err.response
             detail = {
@@ -914,7 +932,7 @@ def tool_call_dispatch(
         params = {}
         if arguments.get("next_token"):
             params["next_token"] = arguments["next_token"]
-        page = client.get_fields_by_deal_id(deal_id, **params)
+        page = upstream.get_fields_by_deal_id(deal_id, **params)
         if any(k in arguments for k in ("non_null", "limit", "names_only", "name_contains")):
             thinned = _thin_fields_container(
                 page.get("fields", {}),
@@ -928,7 +946,7 @@ def tool_call_dispatch(
 
     if name == "describe_schema":
         # Normalize to {field_definitions: {data, next_token}}
-        raw = client.get_field_definitions()
+        raw = upstream.get_field_definitions()
         container = raw.get("field_definitions") if isinstance(raw, dict) else None
         if not isinstance(container, dict):
             container = {"data": [], "next_token": None}
@@ -941,7 +959,7 @@ def tool_call_dispatch(
         params = {}
         if arguments.get("next_token"):
             params["next_token"] = arguments["next_token"]
-        page = client.get_fields_by_investment_id(investment_id, **params)
+        page = upstream.get_fields_by_investment_id(investment_id, **params)
         if any(k in arguments for k in ("non_null", "limit", "names_only", "name_contains")):
             thinned = _thin_fields_container(
                 page.get("fields", {}),
@@ -960,7 +978,7 @@ def tool_call_dispatch(
         params = {}
         if arguments.get("next_token"):
             params["next_token"] = arguments["next_token"]
-        page = client.get_fields_by_property_id(property_id, **params)
+        page = upstream.get_fields_by_property_id(property_id, **params)
         if any(k in arguments for k in ("non_null", "limit", "names_only", "name_contains")):
             thinned = _thin_fields_container(
                 page.get("fields", {}),
@@ -979,7 +997,7 @@ def tool_call_dispatch(
         params = {}
         if arguments.get("next_token"):
             params["next_token"] = arguments["next_token"]
-        page = client.get_fields_by_asset_id(asset_id, **params)
+        page = upstream.get_fields_by_asset_id(asset_id, **params)
         if any(k in arguments for k in ("non_null", "limit", "names_only", "name_contains")):
             thinned = _thin_fields_container(
                 page.get("fields", {}),
@@ -998,7 +1016,7 @@ def tool_call_dispatch(
         params = {}
         if arguments.get("next_token"):
             params["next_token"] = arguments["next_token"]
-        page = client.get_fields_by_loan_id(loan_id, **params)
+        page = upstream.get_fields_by_loan_id(loan_id, **params)
         if any(k in arguments for k in ("non_null", "limit", "names_only", "name_contains")):
             thinned = _thin_fields_container(
                 page.get("fields", {}),
@@ -1019,7 +1037,7 @@ def tool_call_dispatch(
         params = {}
         if arguments.get("next_token"):
             params["next_token"] = arguments["next_token"]
-        page = client.get_fields_by_field_definition_id(field_definition_id, **params)
+        page = upstream.get_fields_by_field_definition_id(field_definition_id, **params)
         if any(k in arguments for k in ("non_null", "limit", "names_only", "name_contains")):
             thinned = _thin_fields_container(
                 page.get("fields", {}),
@@ -1035,31 +1053,31 @@ def tool_call_dispatch(
         params = {}
         if arguments.get("next_token"):
             params["next_token"] = arguments["next_token"]
-        return client.get_file_tag_definitions(**params)
+        return upstream.get_file_tag_definitions(**params)
 
     if name == "get_investments":
         params = {}
         if arguments.get("next_token"):
             params["next_token"] = arguments["next_token"]
-        return client.get_investments(**params)
+        return upstream.get_investments(**params)
 
     if name == "get_loans":
         params = {}
         if arguments.get("next_token"):
             params["next_token"] = arguments["next_token"]
-        return client.get_loans(**params)
+        return upstream.get_loans(**params)
 
     if name == "get_people":
         params = {}
         if arguments.get("next_token"):
             params["next_token"] = arguments["next_token"]
-        return client.get_people(**params)
+        return upstream.get_people(**params)
 
     if name == "get_list_options_by_field_definition_id":
         field_definition_id = arguments.get("field_definition_id")
         if not field_definition_id:
             raise HTTPException(status_code=400, detail="field_definition_id is required")
-        return client.get_list_options_by_field_definition_id(field_definition_id)
+        return upstream.get_list_options_by_field_definition_id(field_definition_id)
 
     if name == "get_deal_files":
         deal_id = arguments.get("deal_id")
@@ -1068,10 +1086,10 @@ def tool_call_dispatch(
         params = {
             k: v for k, v in arguments.items() if k != "deal_id" and v is not None
         }
-        return client.get_deal_files_by_id(deal_id, **params)
+        return upstream.get_deal_files_by_id(deal_id, **params)
 
     if name == "get_portfolio_summary":
-        response = client.get_deals()
+        response = upstream.get_deals()
         deal_list = response.get("deals", {}).get("data", [])
         two_weeks_ago = datetime.utcnow() - timedelta(weeks=2)
         recent_deals: list[dict[str, Any]] = []
@@ -1098,7 +1116,7 @@ def tool_call_dispatch(
         query = arguments.get("query")
         if not query:
             raise HTTPException(status_code=400, detail="query is required")
-        return client.search(query=query)
+        return upstream.search(query=query)
 
     if name == "get_file_by_id":
         file_id = arguments.get("file_id")
@@ -1108,7 +1126,7 @@ def tool_call_dispatch(
 
         # Prefer signed URL; include remote link and also save locally
         try:
-            info = client.get_file_download_url(file_id)
+            info = upstream.get_file_download_url(file_id)
             url = info.get("url")
             filename = info.get("filename") or str(file_id)
             if url:
@@ -1182,30 +1200,33 @@ def tool_call_dispatch(
     # Executive Analytics Tools
     if name == "executive_portfolio_overview":
         days_back = arguments.get("days_back", 90)
-        return client.get_executive_portfolio_overview(days_back=days_back)
+        return upstream.get_executive_portfolio_overview(days_back=days_back)
 
     if name == "deal_velocity_analysis":
         lookback_months = arguments.get("lookback_months", 6)
-        return client.get_deal_velocity_analysis(lookback_months=lookback_months)
+        return upstream.get_deal_velocity_analysis(lookback_months=lookback_months)
 
     if name == "market_performance_insights":
         property_types = arguments.get("property_types")
-        return client.get_market_performance_insights(property_types=property_types)
+        return upstream.get_market_performance_insights(property_types=property_types)
 
     if name == "risk_exposure_analysis":
-        return client.get_risk_exposure_analysis()
+        return upstream.get_risk_exposure_analysis()
 
     raise HTTPException(status_code=404, detail=f"Unknown tool: {name}")
 
 
-def _search_deals_impl(*, query: str, updated_after: Optional[str] = None, limit: int = 50) -> dict[str, Any]:
+def _search_deals_impl(
+    *, query: str, updated_after: Optional[str] = None, limit: int = 50, dp: Optional[DealpathClient] = None
+) -> dict[str, Any]:
     """Local search across deals: name/address contains query.
 
     This avoids returning metrics and keeps scope to deals only.
     """
     # Fetch a wider window then filter locally; clamp to 1000
+    upstream = dp or client
     try:
-        deals_envelope = client.get_deals(limit=1000)
+        deals_envelope = upstream.get_deals(limit=1000)
     except Exception as e:
         # Surface errors consistently
         raise HTTPException(status_code=502, detail=f"Failed to fetch deals: {e}")
@@ -1346,6 +1367,7 @@ async def mcp_http_endpoint(
     payload: Union[dict[str, Any], list[dict[str, Any]]],
     mcp_session_id: Optional[str] = Header(None, alias="Mcp-Session-Id"),
     accept: Optional[str] = Header(None),
+    x_dealpath_key: Optional[str] = Header(None, alias="X-Dealpath-Key"),
 ):
     """Streamable HTTP MCP endpoint (2025-03-26 spec) with session management.
 
@@ -1381,6 +1403,16 @@ async def mcp_http_endpoint(
                 session_id = create_session()
                 session = sessions[session_id]
                 session["initialized"] = True
+
+                # BYO Dealpath key: accept from header or params.dealpath_key
+                # Only store in-memory, never log or persist.
+                try:
+                    dp_key_param = (params.get("dealpath_key") if isinstance(params, dict) else None)
+                except Exception:
+                    dp_key_param = None
+                dp_key = x_dealpath_key or dp_key_param
+                if isinstance(dp_key, str) and dp_key.strip():
+                    session["dealpath_key"] = dp_key.strip()
 
                 result = {
                     "protocolVersion": SUPPORTED_PROTOCOL_VERSION,
@@ -1425,8 +1457,9 @@ async def mcp_http_endpoint(
                 # Metrics instrumentation around tool call
                 import time as _time
                 _start = _time.time()
+                dp_client = get_dealpath_client_for_session(session)
                 try:
-                    result = tool_call_dispatch(name, arguments, base_url=base_url)
+                    result = tool_call_dispatch(name, arguments, base_url=base_url, dp=dp_client)
                 except HTTPException as http_exc:
                     _record_tool_call(name, duration_ms=int((_time.time() - _start) * 1000), error=True)
                     raise http_exc
@@ -1451,11 +1484,12 @@ async def mcp_http_endpoint(
                 if not uri:
                     return mcp_response_error(req_id, -32602, "Missing uri")
                 kind, value = _parse_dealpath_uri(uri)
+                dp_client = get_dealpath_client_for_session(session)
                 if kind == "deal_json":
                     cache_key = f"deal_json:{value}"
                     data = cache.get(cache_key)
                     if data is None:
-                        data = client.get_deal_by_id(value)
+                        data = dp_client.get_deal_by_id(value)
                         cache.set(cache_key, data)
                     text = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
                     return mcp_response_ok(
@@ -1474,7 +1508,7 @@ async def mcp_http_endpoint(
                     cache_key = f"deal_md:{value}"
                     md = md_cache.get(cache_key)
                     if md is None:
-                        deal_obj = cache.get(f"deal_json:{value}") or client.get_deal_by_id(
+                        deal_obj = cache.get(f"deal_json:{value}") or dp_client.get_deal_by_id(
                             value
                         )
                         # normalize deal dict from nested envelope if needed
@@ -2073,7 +2107,10 @@ def get_folders_by_deal_id_endpoint(deal_id: int):
 
 
 @app.get("/mcp/getFoldersByAssetId/{asset_id}")
-def get_folders_by_asset_id_endpoint(asset_id: int):
+def get_folders_by_asset_id_endpoint(
+    asset_id: int,
+    x_dealpath_key: Optional[str] = Header(None, alias="X-Dealpath-Key"),
+):
     """
     Retrieves a list of folders for a specific asset.
 
@@ -2084,7 +2121,8 @@ def get_folders_by_asset_id_endpoint(asset_id: int):
         A JSON object containing a list of folders.
     """
     try:
-        folders = client.get_folders_by_asset_id(asset_id)
+        dp_client = DealpathClient(api_key=x_dealpath_key) if x_dealpath_key else client
+        folders = dp_client.get_folders_by_asset_id(asset_id)
         return folders
     except Exception as e:
         raise HTTPException(
@@ -2094,7 +2132,9 @@ def get_folders_by_asset_id_endpoint(asset_id: int):
 
 @app.get("/mcp/getInvestments")
 def get_investments_endpoint(
-    page: Optional[int] = None, per_page: Optional[int] = None
+    page: Optional[int] = None,
+    per_page: Optional[int] = None,
+    x_dealpath_key: Optional[str] = Header(None, alias="X-Dealpath-Key"),
 ):
     """
     Retrieves a list of investments, with optional pagination.
@@ -2112,7 +2152,8 @@ def get_investments_endpoint(
             params["page"] = page
         if per_page:
             params["per_page"] = per_page
-        investments = client.get_investments(**params)
+        dp_client = DealpathClient(api_key=x_dealpath_key) if x_dealpath_key else client
+        investments = dp_client.get_investments(**params)
         return investments
     except Exception as e:
         raise HTTPException(
@@ -2121,7 +2162,10 @@ def get_investments_endpoint(
 
 
 @app.get("/mcp/getListOptionsByFieldDefinitionId/{field_definition_id}")
-def get_list_options_by_field_definition_id_endpoint(field_definition_id: str):
+def get_list_options_by_field_definition_id_endpoint(
+    field_definition_id: str,
+    x_dealpath_key: Optional[str] = Header(None, alias="X-Dealpath-Key"),
+):
     """
     Retrieves the available options for a list-based custom field.
 
@@ -2132,7 +2176,8 @@ def get_list_options_by_field_definition_id_endpoint(field_definition_id: str):
         A JSON object containing the list options.
     """
     try:
-        list_options = client.get_list_options_by_field_definition_id(
+        dp_client = DealpathClient(api_key=x_dealpath_key) if x_dealpath_key else client
+        list_options = dp_client.get_list_options_by_field_definition_id(
             field_definition_id
         )
         return list_options
@@ -2143,7 +2188,11 @@ def get_list_options_by_field_definition_id_endpoint(field_definition_id: str):
 
 
 @app.get("/mcp/getLoans")
-def get_loans_endpoint(page: Optional[int] = None, per_page: Optional[int] = None):
+def get_loans_endpoint(
+    page: Optional[int] = None,
+    per_page: Optional[int] = None,
+    x_dealpath_key: Optional[str] = Header(None, alias="X-Dealpath-Key"),
+):
     """
     Retrieves a list of loans, with optional pagination.
 
@@ -2160,7 +2209,8 @@ def get_loans_endpoint(page: Optional[int] = None, per_page: Optional[int] = Non
             params["page"] = page
         if per_page:
             params["per_page"] = per_page
-        loans = client.get_loans(**params)
+        dp_client = DealpathClient(api_key=x_dealpath_key) if x_dealpath_key else client
+        loans = dp_client.get_loans(**params)
         return loans
     except Exception as e:
         raise HTTPException(
@@ -2169,7 +2219,11 @@ def get_loans_endpoint(page: Optional[int] = None, per_page: Optional[int] = Non
 
 
 @app.get("/mcp/getPeople")
-def get_people_endpoint(page: Optional[int] = None, per_page: Optional[int] = None):
+def get_people_endpoint(
+    page: Optional[int] = None,
+    per_page: Optional[int] = None,
+    x_dealpath_key: Optional[str] = Header(None, alias="X-Dealpath-Key"),
+):
     """
     Retrieves a list of people, with optional pagination.
 
@@ -2186,7 +2240,8 @@ def get_people_endpoint(page: Optional[int] = None, per_page: Optional[int] = No
             params["page"] = page
         if per_page:
             params["per_page"] = per_page
-        people = client.get_people(**params)
+        dp_client = DealpathClient(api_key=x_dealpath_key) if x_dealpath_key else client
+        people = dp_client.get_people(**params)
         return people
     except Exception as e:
         raise HTTPException(
@@ -2195,7 +2250,10 @@ def get_people_endpoint(page: Optional[int] = None, per_page: Optional[int] = No
 
 
 @app.get("/mcp/getPropertyById/{property_id}")
-def get_property_by_id_endpoint(property_id: str):
+def get_property_by_id_endpoint(
+    property_id: str,
+    x_dealpath_key: Optional[str] = Header(None, alias="X-Dealpath-Key"),
+):
     """
     Retrieves a single property by its unique ID.
 
@@ -2206,7 +2264,8 @@ def get_property_by_id_endpoint(property_id: str):
         A JSON object representing the property.
     """
     try:
-        property_data = client.get_property_by_id(property_id)
+        dp_client = DealpathClient(api_key=x_dealpath_key) if x_dealpath_key else client
+        property_data = dp_client.get_property_by_id(property_id)
         return property_data
     except Exception as e:
         raise HTTPException(
@@ -2215,7 +2274,11 @@ def get_property_by_id_endpoint(property_id: str):
 
 
 @app.get("/mcp/getProperties")
-def get_properties_endpoint(page: Optional[int] = None, per_page: Optional[int] = None):
+def get_properties_endpoint(
+    page: Optional[int] = None,
+    per_page: Optional[int] = None,
+    x_dealpath_key: Optional[str] = Header(None, alias="X-Dealpath-Key"),
+):
     """
     Retrieves a list of properties, with optional pagination.
 
@@ -2232,7 +2295,8 @@ def get_properties_endpoint(page: Optional[int] = None, per_page: Optional[int] 
             params["page"] = page
         if per_page:
             params["per_page"] = per_page
-        properties = client.get_properties(**params)
+        dp_client = DealpathClient(api_key=x_dealpath_key) if x_dealpath_key else client
+        properties = dp_client.get_properties(**params)
         return properties
     except Exception as e:
         raise HTTPException(
@@ -2241,7 +2305,10 @@ def get_properties_endpoint(page: Optional[int] = None, per_page: Optional[int] 
 
 
 @app.get("/mcp/getRolesByDealId/{deal_id}")
-def get_roles_by_deal_id_endpoint(deal_id: str):
+def get_roles_by_deal_id_endpoint(
+    deal_id: str,
+    x_dealpath_key: Optional[str] = Header(None, alias="X-Dealpath-Key"),
+):
     """
     Retrieves the roles associated with a specific deal.
 
@@ -2252,7 +2319,8 @@ def get_roles_by_deal_id_endpoint(deal_id: str):
         A JSON object containing a list of roles.
     """
     try:
-        roles = client.get_roles_by_deal_id(deal_id)
+        dp_client = DealpathClient(api_key=x_dealpath_key) if x_dealpath_key else client
+        roles = dp_client.get_roles_by_deal_id(deal_id)
         return roles
     except Exception as e:
         raise HTTPException(
@@ -2261,7 +2329,10 @@ def get_roles_by_deal_id_endpoint(deal_id: str):
 
 
 @app.get("/mcp/getRolesByAssetId/{asset_id}")
-def get_roles_by_asset_id_endpoint(asset_id: str):
+def get_roles_by_asset_id_endpoint(
+    asset_id: str,
+    x_dealpath_key: Optional[str] = Header(None, alias="X-Dealpath-Key"),
+):
     """
     Retrieves the roles associated with a specific asset.
 
@@ -2272,7 +2343,8 @@ def get_roles_by_asset_id_endpoint(asset_id: str):
         A JSON object containing a list of roles.
     """
     try:
-        roles = client.get_roles_by_asset_id(asset_id)
+        dp_client = DealpathClient(api_key=x_dealpath_key) if x_dealpath_key else client
+        roles = dp_client.get_roles_by_asset_id(asset_id)
         return roles
     except Exception as e:
         raise HTTPException(
@@ -2285,6 +2357,7 @@ def search_endpoint(
     query: str,
     updated_after: Optional[str] = Query(None, description="ISO 8601 timestamp filter"),
     limit: int = Query(50, ge=1, le=200, description="Max results to return (<=200)"),
+    x_dealpath_key: Optional[str] = Header(None, alias="X-Dealpath-Key"),
 ):
     """
     Performs a global search across the Dealpath environment.
@@ -2297,7 +2370,8 @@ def search_endpoint(
     """
     try:
         # Align with MCP search tool: local search across deals only
-        return _search_deals_impl(query=query, updated_after=updated_after, limit=limit)
+        dp_client = DealpathClient(api_key=x_dealpath_key) if x_dealpath_key else None
+        return _search_deals_impl(query=query, updated_after=updated_after, limit=limit, dp=dp_client)
     except Exception as e:
         raise HTTPException(
             status_code=500, detail={"code": "search_failed", "message": str(e)}
