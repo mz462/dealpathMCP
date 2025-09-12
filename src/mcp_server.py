@@ -2417,10 +2417,16 @@ def health_check():
 @app.get("/health/ready")
 def readiness_check():
     """Readiness probe - checks if server can handle requests."""
+    # In BYO-only mode there may be no default client; don't fail readiness for that.
+    if client is None:
+        return {
+            "status": "ready",
+            "timestamp": datetime.utcnow().isoformat(),
+            "checks": {"dealpath_api": "skipped_no_default_key", "session_store": "ok"},
+        }
     try:
-        # Test Dealpath API connectivity
+        # Test Dealpath API connectivity with default key if present
         client.get_deals(limit=1)
-
         return {
             "status": "ready",
             "timestamp": datetime.utcnow().isoformat(),
