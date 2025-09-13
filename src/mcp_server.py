@@ -1474,6 +1474,12 @@ async def mcp_http_endpoint(
                 import time as _time
                 _start = _time.time()
                 dp_client = get_dealpath_client_for_session(session)
+                # Allow per-request header for BYO key even if no session/initialize
+                if dp_client is None and x_dealpath_key and x_dealpath_key.strip():
+                    try:
+                        dp_client = DealpathClient(api_key=x_dealpath_key.strip())
+                    except Exception:
+                        dp_client = None
                 try:
                     result = tool_call_dispatch(name, arguments, base_url=base_url, dp=dp_client)
                 except HTTPException as http_exc:
@@ -1501,6 +1507,11 @@ async def mcp_http_endpoint(
                     return mcp_response_error(req_id, -32602, "Missing uri")
                 kind, value = _parse_dealpath_uri(uri)
                 dp_client = get_dealpath_client_for_session(session)
+                if dp_client is None and x_dealpath_key and x_dealpath_key.strip():
+                    try:
+                        dp_client = DealpathClient(api_key=x_dealpath_key.strip())
+                    except Exception:
+                        dp_client = None
                 if dp_client is None:
                     return mcp_response_error(
                         req_id,

@@ -1,17 +1,20 @@
 {
+  "dxt_version": "1",
   "name": "Dealpath (Remote)",
-  "id": "dealpath-remote",
   "version": "0.1.0",
-  "description": "Connects Claude Desktop to a deployed Dealpath MCP HTTP server via mcp-remote.",
-  "homepage": "https://your-company.example/dealpath-mcp",
-  "categories": ["data", "real-estate"],
-  "entry": {
-    "type": "process",
-    "command": "mcp-remote",
-    "args": ["https://YOUR_HOSTNAME_OR_URL/mcp"],
+  "description": "Connect Claude Desktop to a deployed Dealpath MCP HTTP server via mcp-remote.",
+  "author": {
+    "name": "Dealpath MCP",
+    "url": "https://dealpath-mcp-2605630468.azurewebsites.net"
+  },
+  "server": {
+    "type": "binary",
+    "path": "mcp-remote",
+    "args": [
+      "https://dealpath-mcp-2605630468.azurewebsites.net/mcp"
+    ],
     "env": {
       "MCP_REMOTE_HEADERS": "{\"Authorization\":\"Bearer ${env:MCP_TOKEN}\",\"X-Dealpath-Key\":\"${env:DEALPATH_KEY}\"}"
     }
   }
 }
-
