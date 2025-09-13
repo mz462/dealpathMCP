@@ -6,4 +6,5 @@ python-dotenv>=1.0.0
 sse-starlette>=1.8.0
 pydantic>=2.4.0
 uuid6>=2023.5.2
+prometheus-client>=0.20.0
 PyYAML>=6.0.1

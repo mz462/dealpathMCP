@@ -4,7 +4,7 @@ import os
 import pathlib
 import re
 from collections import Counter, defaultdict
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional, Union, Callable, Tuple
 from dataclasses import dataclass
 
@@ -17,15 +17,45 @@ from uuid6 import uuid7
 
 from .dealpath_client import DealpathClient
 from .openapi_tools import load_dealpath_tools_from_yaml, load_get_operations, _jsonschema_from_params
+try:
+    from prometheus_client import Counter as PCounter, Histogram as PHist, generate_latest, CONTENT_TYPE_LATEST
+    HAVE_PROM = True
+except Exception:
+    HAVE_PROM = False
+    PCounter = PHist = None  # type: ignore
+    generate_latest = lambda: b""  # type: ignore
+    CONTENT_TYPE_LATEST = "text/plain; version=0.0.4; charset=utf-8"  # type: ignore
 
 # --- App & Security ---------------------------------------------------------
 
 load_dotenv()
 
 # Record start time for uptime calculations
-START_TIME = datetime.utcnow()
+START_TIME = datetime.now(timezone.utc)
 
 logger = logging.getLogger(__name__)
+
+# Configure simple JSON logging by default
+class JsonFormatter(logging.Formatter):
+    def format(self, record: logging.LogRecord) -> str:
+        data = {
+            "time": datetime.now(timezone.utc).isoformat(),
+            "level": record.levelname,
+            "name": record.name,
+            "message": record.getMessage(),
+        }
+        try:
+            if record.exc_info:
+                data["exc_info"] = self.formatException(record.exc_info)
+        except Exception:
+            pass
+        return json.dumps(data, ensure_ascii=False)
+
+if not logging.getLogger().handlers:
+    handler = logging.StreamHandler()
+    handler.setFormatter(JsonFormatter())
+    logging.getLogger().addHandler(handler)
+    logging.getLogger().setLevel(logging.INFO)
 
 app = FastAPI(title="Dealpath MCP Server (Streamable HTTP)")
 try:
@@ -49,6 +79,33 @@ FILE_STORAGE_DIR = os.getenv(
     "file_storage_dir", os.path.join(os.getcwd(), "local_files")
 )
 
+RATE_LIMIT_CALLS_PER_MIN = int(os.getenv("RATE_LIMIT_CALLS_PER_MIN", "60"))
+
+class TokenBucket:
+    def __init__(self, capacity: int, refill_per_second: float):
+        self.capacity = max(1, capacity)
+        self.tokens = float(capacity)
+        self.refill_per_second = refill_per_second
+        self.last = datetime.now(timezone.utc)
+
+    def take(self, n: float = 1.0) -> bool:
+        now = datetime.now(timezone.utc)
+        elapsed = (now - self.last).total_seconds()
+        self.last = now
+        self.tokens = min(self.capacity, self.tokens + elapsed * self.refill_per_second)
+        if self.tokens >= n:
+            self.tokens -= n
+            return True
+        return False
+
+_buckets: dict[str, TokenBucket] = {}
+def _rate_limiter_bucket(key: str) -> TokenBucket:
+    b = _buckets.get(key)
+    if b is None:
+        b = TokenBucket(capacity=RATE_LIMIT_CALLS_PER_MIN, refill_per_second=RATE_LIMIT_CALLS_PER_MIN / 60.0)
+        _buckets[key] = b
+    return b
+
 # --- Lightweight TTL cache -------------------------------------------------
 
 class TTLCache:
@@ -66,14 +123,14 @@ class TTLCache:
         if not item:
             return None
         expires_at, value = item
-        if datetime.utcnow() >= expires_at:
+        if datetime.now(timezone.utc) >= expires_at:
             self._store.pop(key, None)
             return None
         return value
 
     def set(self, key: str, value: Any, ttl_seconds: Optional[int] = None) -> None:
         ttl = ttl_seconds if ttl_seconds is not None else self.default_ttl
-        self._store[key] = (datetime.utcnow() + timedelta(seconds=ttl), value)
+        self._store[key] = (datetime.now(timezone.utc) + timedelta(seconds=ttl), value)
 
 
 # Small caches scoped to process
@@ -90,6 +147,22 @@ TOOL_METRICS: dict[str, Any] = {
     "by_name": defaultdict(lambda: {"calls": 0, "errors": 0, "total_latency_ms": 0, "count": 0}),
 }
 
+# Prometheus metrics
+if HAVE_PROM:
+    PROM_TOOL_CALLS = PCounter("mcp_tool_calls_total", "Total tool calls", ["tool", "status"])  # type: ignore
+    PROM_TOOL_DURATION = PHist(
+        "mcp_tool_call_duration_ms",
+        "Tool call duration in milliseconds",
+        ["tool"],
+        buckets=(50, 100, 200, 500, 1000, 2000, 5000, 10000),
+    )  # type: ignore
+    PROM_RATE_LIMIT_HITS = PCounter("mcp_rate_limit_hits_total", "Rate limit hits")  # type: ignore
+    PROM_LOCAL_FILES_SERVED = PCounter("mcp_local_files_served_total", "Local files served")  # type: ignore
+    PROM_LOCAL_BYTES_SERVED = PCounter("mcp_local_bytes_served_total", "Local bytes served")  # type: ignore
+    PROM_UPSTREAM_FAILURES = PCounter("mcp_upstream_failures_total", "Upstream failures", ["operation"])  # type: ignore
+else:
+    PROM_TOOL_CALLS = PROM_TOOL_DURATION = PROM_RATE_LIMIT_HITS = PROM_LOCAL_FILES_SERVED = PROM_LOCAL_BYTES_SERVED = PROM_UPSTREAM_FAILURES = None
+
 
 def _record_tool_call(name: str, duration_ms: Optional[int] = None, error: bool = False) -> None:
     """Record a tool call result into in-memory metrics."""
@@ -100,9 +173,22 @@ def _record_tool_call(name: str, duration_ms: Optional[int] = None, error: bool 
         if duration_ms is not None:
             bucket["total_latency_ms"] += int(duration_ms)
             bucket["count"] += 1
+            try:
+                PROM_TOOL_DURATION.labels(tool=name).observe(max(0.0, float(duration_ms)))
+            except Exception:
+                pass
         if error:
             TOOL_METRICS["errors_total"] += 1
             bucket["errors"] += 1
+            try:
+                PROM_TOOL_CALLS.labels(tool=name, status="error").inc()
+            except Exception:
+                pass
+        else:
+            try:
+                PROM_TOOL_CALLS.labels(tool=name, status="ok").inc()
+            except Exception:
+                pass
     except Exception:
         # Never let metrics recording affect request flow
         pass
@@ -112,8 +198,8 @@ def create_session() -> str:
     """Create a new MCP session with secure session ID."""
     session_id = str(uuid7())
     sessions[session_id] = {
-        "created_at": datetime.utcnow(),
-        "last_accessed": datetime.utcnow(),
+        "created_at": datetime.now(timezone.utc),
+        "last_accessed": datetime.now(timezone.utc),
         "protocol_version": SUPPORTED_PROTOCOL_VERSION,
         "initialized": False,
         # Optionally stores a per-session Dealpath API key (BYO key). Not persisted.
@@ -130,13 +216,13 @@ def get_session(session_id: Optional[str]) -> Optional[dict[str, Any]]:
         return None
 
     session = sessions[session_id]
-    session["last_accessed"] = datetime.utcnow()
+    session["last_accessed"] = datetime.now(timezone.utc)
     return session
 
 
 def cleanup_expired_sessions(max_age_hours: int = 24):
     """Clean up expired sessions."""
-    cutoff = datetime.utcnow() - timedelta(hours=max_age_hours)
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=max_age_hours)
     expired = [
         sid for sid, session in sessions.items() if session["last_accessed"] < cutoff
     ]
@@ -346,7 +432,7 @@ def _sanitize_id(value: str) -> str:
 
 
 def _build_local_relpath(file_id: str, filename: str) -> str:
-    date_str = datetime.utcnow().strftime("%Y%m%d")
+    date_str = datetime.now(timezone.utc).strftime("%Y%m%d")
     safe_id = _sanitize_id(file_id)
     safe_name = _sanitize_filename(filename)
     return f"{date_str}/{safe_id}/{safe_name}"
@@ -872,15 +958,33 @@ async def mcp_http_endpoint(
                 return mcp_response_ok(req_id, build_tools_list())
 
             if method in ("tools/call", "tools.call"):
+                # Rate limit per session or IP
+                client_ip = request.client.host if request.client else "unknown"
+                key_for_bucket = mcp_session_id or client_ip
+                bucket = _rate_limiter_bucket(f"tools:{key_for_bucket}")
+                if not bucket.take(1):
+                    try:
+                        PROM_RATE_LIMIT_HITS.inc()
+                    except Exception:
+                        pass
+                    return mcp_response_error(
+                        req_id,
+                        429,
+                        "Rate limit exceeded for tools/call (per minute)",
+                        {"retry_after_seconds": 60},
+                    )
                 name = params.get("name")
                 arguments = params.get("arguments") or {}
                 if not name:
                     return mcp_response_error(req_id, -32602, "Missing tool name")
 
                 # Enhanced logging for tool calls
-                logger.info(
-                    f"Tool call: {name} with args: {list(arguments.keys())} [session: {mcp_session_id}]"
-                )
+                try:
+                    logger.info(
+                        f"Tool call: {name} with args: {list(arguments.keys())} [session: {mcp_session_id}]"
+                    )
+                except Exception:
+                    pass
 
                 # Metrics instrumentation around tool call
                 import time as _time
@@ -1134,7 +1238,7 @@ async def oauth_token_stub():
 
 
 @app.get("/local-files/{date}/{file_id}/{filename}")
-async def serve_local_file(date: str, file_id: str, filename: str):
+async def serve_local_file(request: Request, date: str, file_id: str, filename: str):
     base = pathlib.Path(FILE_STORAGE_DIR).resolve()
     # Normalize and sanitize path components
     safe_date = re.sub(r"[^0-9]", "", date)[:8]
@@ -1146,8 +1250,21 @@ async def serve_local_file(date: str, file_id: str, filename: str):
         raise HTTPException(status_code=404, detail="File not found")
     # Stream file back
     from fastapi.responses import FileResponse
-
-    return FileResponse(path)
+    # Optional bearer guard when MCP_TOKEN is set
+    if MCP_TOKEN:
+        authz = request.headers.get("authorization", "")
+        scheme, _, token = authz.partition(" ")
+        if scheme.lower() != "bearer" or not token or token != MCP_TOKEN:
+            raise HTTPException(status_code=401, detail="Unauthorized")
+    resp = FileResponse(path)
+    resp.headers["X-Content-Type-Options"] = "nosniff"
+    try:
+        PROM_LOCAL_FILES_SERVED.inc()
+        size = os.path.getsize(path)
+        PROM_LOCAL_BYTES_SERVED.inc(size)
+    except Exception:
+        pass
+    return resp
 
 
 @app.get("/mcp/getDeals")
@@ -1753,7 +1870,7 @@ def health_check():
     """Health check endpoint for load balancers and monitoring systems."""
     return {
         "status": "healthy",
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
         "version": "0.2.0",
         "protocol_version": SUPPORTED_PROTOCOL_VERSION,
     }
@@ -1766,7 +1883,7 @@ def readiness_check():
     if client is None:
         return {
             "status": "ready",
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "checks": {"dealpath_api": "skipped_no_default_key", "session_store": "ok"},
         }
     try:
@@ -1774,7 +1891,7 @@ def readiness_check():
         client.get_deals(limit=1)
         return {
             "status": "ready",
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "checks": {"dealpath_api": "ok", "session_store": "ok"},
         }
     except Exception as e:
@@ -1783,7 +1900,7 @@ def readiness_check():
             status_code=503,
             detail={
                 "status": "not_ready",
-                "timestamp": datetime.utcnow().isoformat(),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
                 "checks": {"dealpath_api": "failed", "error": str(e)},
             },
         )
@@ -1794,18 +1911,26 @@ def liveness_check():
     """Liveness probe - basic server responsiveness."""
     return {
         "status": "alive",
-        "timestamp": datetime.utcnow().isoformat(),
-        "uptime_seconds": (datetime.utcnow() - START_TIME).total_seconds(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "uptime_seconds": (datetime.now(timezone.utc) - START_TIME).total_seconds(),
     }
 
 
 @app.get("/metrics")
 def metrics_endpoint():
-    """Metrics endpoint for monitoring and observability."""
-    # Clean up expired sessions before reporting
-    cleaned_sessions = cleanup_expired_sessions()
+    """Metrics endpoint.
 
-    # Snapshot tool metrics into JSON-serializable structure
+    - If Prometheus client available → return text exposition format
+    - Else → return JSON snapshot of internal counters (backward-compat)
+    """
+    if HAVE_PROM:
+        try:
+            return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
+        except Exception:
+            return Response(b"", media_type=CONTENT_TYPE_LATEST)
+
+    # JSON fallback
+    cleaned_sessions = cleanup_expired_sessions()
     by_name: dict[str, Any] = {}
     try:
         for k, v in TOOL_METRICS["by_name"].items():
@@ -1817,32 +1942,19 @@ def metrics_endpoint():
             }
     except Exception:
         by_name = {}
-
     return {
         "mcp_server": {
             "version": "0.2.0",
             "protocol_version": SUPPORTED_PROTOCOL_VERSION,
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
         },
         "sessions": {
             "active_sessions": len(sessions),
             "cleaned_sessions": cleaned_sessions,
-            "session_details": [
-                {
-                    "session_id": sid[:8] + "...",  # truncated for privacy
-                    "created_at": session["created_at"].isoformat(),
-                    "last_accessed": session["last_accessed"].isoformat(),
-                    "initialized": session["initialized"],
-                }
-                for sid, session in list(sessions.items())[
-                    :10
-                ]  # limit to 10 for brevity
-            ],
         },
         "system": {
             "file_storage_dir": FILE_STORAGE_DIR,
             "auth_enabled": MCP_TOKEN is not None,
-            "allowed_origins": list(ALLOWED_ORIGINS),
         },
         "tools": {
             "calls_total": TOOL_METRICS.get("calls_total", 0),
