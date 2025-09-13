@@ -14,25 +14,15 @@ def build_app_with_env(token: str | None):
     return mcp_server.app, mcp_server
 
 
-def test_search_deals_filters_by_name_and_address(monkeypatch):
+def test_search_proxies_upstream_search(monkeypatch):
     app, mod = build_app_with_env(None)
     client = TestClient(app)
 
-    fake_deals = {
-        "deals": {
-            "data": [
-                {"id": 1, "name": "Boston Office Tower", "address": {"city": "Boston"}},
-                {"id": 2, "name": "Chicago Retail", "address": {"city": "Chicago"}},
-                {"id": 3, "name": "Warehouse", "address": {"city": "Houston"}},
-            ],
-            "next_token": None,
-        }
-    }
-
     class FakeClient:
         @staticmethod
-        def get_deals(**kwargs):
-            return fake_deals
+        def search(**kwargs):
+            assert kwargs.get("query") == "boston"
+            return {"results": [{"id": 1, "type": "deal"}]}
 
     monkeypatch.setattr(mod, "client", FakeClient())
 
@@ -40,14 +30,13 @@ def test_search_deals_filters_by_name_and_address(monkeypatch):
         "jsonrpc": "2.0",
         "id": "s",
         "method": "tools/call",
-        "params": {"name": "search_deals", "arguments": {"query": "boston"}},
+        "params": {"name": "search", "arguments": {"query": "boston"}},
     }
     r = client.post("/mcp", json=payload)
     assert r.status_code == 200
     parts = r.json()["result"]["content"]
     data = json.loads(parts[0]["text"])
-    items = data["deals"]["data"]
-    assert [d["id"] for d in items] == [1]
+    assert data["results"][0]["id"] == 1
 
 
 def test_resources_read_deal_json_and_md(monkeypatch):
@@ -97,4 +86,3 @@ def test_resources_read_deal_json_and_md(monkeypatch):
     contents2 = r2.json()["result"]["contents"]
     assert contents2[0]["mimeType"] == "text/markdown"
     assert "Test Deal" in contents2[0]["text"]
-

@@ -36,7 +36,7 @@ def test_initialize_and_tools_list_open_mode():
     assert r2.status_code == 200
     tools = r2.json()["result"]["tools"]
     names = {t["name"] for t in tools}
-    assert {"get_deals", "get_deal", "get_portfolio_summary"}.issubset(names)
+    assert {"get_deals", "get_deal"}.issubset(names)
 
 
 def test_tools_call_get_deals_monkeypatched_open_mode(monkeypatch):
@@ -69,18 +69,10 @@ def test_get_file_by_id_returns_resource_link(monkeypatch):
     app, mod = build_app_with_env(None)
     client = TestClient(app)
 
-    def fake_get_file_download_url(file_id: str):
-        return {"url": "https://example.com/tmp/file123", "filename": "doc.pdf"}
-
     class FakeClient:
         @staticmethod
-        def get_file_download_url(file_id: str):
-            return {"url": "https://example.com/tmp/file123", "filename": "doc.pdf"}
-
-        @staticmethod
         def download_file_content(file_id: str):
-            # not used in this path
-            return {"content": b"", "filename": "doc.pdf", "mime_type": "application/pdf"}
+            return {"content": b"hello", "filename": "doc.pdf", "mime_type": "application/pdf"}
 
     monkeypatch.setattr(mod, "client", FakeClient())
 
@@ -93,11 +85,10 @@ def test_get_file_by_id_returns_resource_link(monkeypatch):
     r = client.post("/mcp", json=payload)
     assert r.status_code == 200
     parts = r.json()["result"]["content"]
-    # Expect at least 3 parts: a text summary, a local resource_link, and a remote resource_link last
+    # Expect at least 2 parts: a text summary and a local resource_link
     assert len(parts) >= 2
-    assert parts[-1]["type"] == "resource_link" and parts[-1]["uri"].startswith("https://example.com/")
-    # Ensure a local link is also present somewhere
-    assert any(p.get("type") == "resource_link" and "/local-files/" in p.get("uri", "") for p in parts)
+    assert parts[-1]["type"] == "resource_link"
+    assert "/local-files/" in parts[-1]["uri"]
 
 
 def test_get_file_by_id_fallbacks_to_local_save(monkeypatch, tmp_path):

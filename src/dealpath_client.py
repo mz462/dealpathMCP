@@ -71,17 +71,6 @@ class DealpathClient:
         return response.json()
 
     def get_deal_files_by_id(self, deal_id: int, **params):
-        """
-        Returns a paginated list of files belonging to a deal.
-
-        :param deal_id: The ID of the deal.
-        :param params: Optional query parameters:
-            - parent_folder_ids: list[int]
-            - file_tag_definition_ids: list[int]
-            - updated_before: int (timestamp)
-            - updated_after: int (timestamp)
-            - next_token: str
-        """
         url = f"{BASE_URL}/files/deal/{deal_id}"
         response = self.session.get(url, params=params, timeout=DEFAULT_TIMEOUT)
         response.raise_for_status()
@@ -149,7 +138,6 @@ class DealpathClient:
         return response.json()
 
     def get_file_by_id(self, file_id: str):
-        # Step 1: Get the temporary download URL
         url_response = self.session.get(
             f"{BASE_URL}/file/{file_id}/download_url", timeout=DEFAULT_TIMEOUT
         )
@@ -157,24 +145,15 @@ class DealpathClient:
         download_details = url_response.json()
         download_url = download_details.get("url")
         filename = download_details.get("name", f"{file_id}.unknown")
-
         if not download_url:
             raise Exception("Could not retrieve download URL.")
-
-        # Step 2: Download the file from the temporary URL
         file_response = self.session.get(
             download_url, headers={"Accept": "*/*"}, timeout=DEFAULT_TIMEOUT
         )
         file_response.raise_for_status()
-
         return {"content": file_response.content, "filename": filename}
 
-    def get_file_download_url(self, file_id: str):
-        """Return a temporary, signed download URL and filename for a file.
-
-        This avoids proxying large binaries through our server; callers can
-        download directly from Dealpath using the signed URL.
-        """
+    def get_file_download_url(self, file_id: str) -> dict[str, Any]:
         url_response = self.session.get(
             f"{BASE_URL}/file/{file_id}/download_url", timeout=DEFAULT_TIMEOUT
         )
@@ -183,21 +162,13 @@ class DealpathClient:
         return {"url": data.get("url"), "filename": data.get("name", f"{file_id}")}
 
     def download_file_content(self, file_id: str) -> dict[str, Any]:
-        """Download file bytes directly from files.dealpath.com.
-
-        Returns dict with keys: content (bytes), filename (str), mime_type (str | None).
-        """
         url = f"{FILES_BASE_URL}/file/{file_id}"
-        # Use only Authorization header; do not send JSON Accept header here
         headers = {"Authorization": f"Bearer {DEALPATH_API_KEY}", "Accept": "*/*"}
         resp = self.session.get(url, headers=headers, stream=True, timeout=DEFAULT_TIMEOUT)
         resp.raise_for_status()
-
-        # Try to parse filename from Content-Disposition
         filename = None
         cd = resp.headers.get("Content-Disposition")
         if cd:
-            # naive extraction: filename="name" or filename=name
             m = re.search(r"filename\*=UTF-8''([^;]+)", cd)
             if m:
                 filename = requests.utils.unquote(m.group(1))
@@ -207,7 +178,6 @@ class DealpathClient:
                     filename = m2.group(1)
         if not filename:
             filename = str(file_id)
-
         mime_type = resp.headers.get("Content-Type")
         content = resp.content
         return {"content": content, "filename": filename, "mime_type": mime_type}
@@ -238,9 +208,7 @@ class DealpathClient:
         response.raise_for_status()
         return response.json()
 
-    def get_list_options_by_field_definition_id(
-        self, field_definition_id: str, **params
-    ):
+    def get_list_options_by_field_definition_id(self, field_definition_id: str, **params):
         response = self.session.get(
             f"{BASE_URL}/list_options/field_definition/{field_definition_id}",
             params=params,
@@ -297,6 +265,8 @@ class DealpathClient:
         )
         response.raise_for_status()
         return response.json()
+
+    # Executive analytics removed in lean API
 
     # --- Executive Analytics Methods ---
 

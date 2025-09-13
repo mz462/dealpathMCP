@@ -84,7 +84,7 @@ Response shape (abridged):
 }
 ```
 
-### Example: tools/call (search_deals by name/address)
+### Example: tools/call (search via upstream)
 
 ```
 curl -s \
@@ -94,7 +94,7 @@ curl -s \
         "jsonrpc":"2.0",
         "id":"s1",
         "method":"tools/call",
-        "params":{ "name":"search_deals", "arguments": {"query":"boston"} }
+        "params":{ "name":"search", "arguments": {"query":"boston"} }
       }' \
   http://127.0.0.1:8000/mcp | jq
 ```
@@ -131,7 +131,7 @@ Security notes
 - Do not log request headers. This server already avoids logging secrets.
 - Keys are cleared automatically with session cleanup; they are never written to disk.
 
-## Desktop Extensions (.mcpb)
+## Desktop Extensions (.mcpb, DXT manifest)
 
 You can use this server with Claude Desktop via a remote-only MCP bundle (no server code embedded).
 
@@ -147,7 +147,12 @@ You can use this server with Claude Desktop via a remote-only MCP bundle (no ser
 Build and install
 - Build the bundle file: `./scripts/make_mcpb.sh` → outputs `dealpath-remote.mcpb` at repo root.
 - Install: drag-drop the `.mcpb` into Claude Desktop Extensions (or “Install from file”).
-- Ensure Claude Desktop is launched with the env vars above so the headers resolve.
+- The bundle contains a DXT `manifest.json` with `dxt_version: "1"` and launches `mcp-remote`.
+- Optional: override the server URL embedded in the manifest at build time:
+  - `MCP_URL="https://api.example.com/mcp" ./scripts/make_mcpb.sh`
+- At runtime, set environment variables so headers resolve:
+  - `MCP_TOKEN` — bearer required by POST /mcp
+  - `DEALPATH_KEY` — Dealpath API key forwarded via X-Dealpath-Key
 
 Notes
 - This approach keeps the server deployable independently; the `.mcpb` only points to it.

@@ -6,6 +6,7 @@ import re
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta
 from typing import Any, Optional, Union, Callable, Tuple
+from dataclasses import dataclass
 
 import requests
 from dotenv import load_dotenv
@@ -15,6 +16,7 @@ from fastapi.responses import JSONResponse
 from uuid6 import uuid7
 
 from .dealpath_client import DealpathClient
+from .openapi_tools import load_dealpath_tools_from_yaml, load_get_operations, _jsonschema_from_params
 
 # --- App & Security ---------------------------------------------------------
 
@@ -229,35 +231,7 @@ app.add_middleware(
 Json = dict[str, Any]
 
 
-def _thin_fields_container(
-    container: dict[str, Any],
-    *,
-    non_null: bool = False,
-    limit: Optional[int] = None,
-    names_only: bool = False,
-    name_contains: Optional[list[str]] = None,
-) -> dict[str, Any]:
-    data = list(container.get("data", []))
-    if non_null:
-        data = [item for item in data if item.get("value") not in (None, "", [])]
-    if name_contains:
-        needles = [s.lower() for s in name_contains if isinstance(s, str) and s]
-        if needles:
-            data = [
-                item
-                for item in data
-                if any(n in str(item.get("name", "")).lower() for n in needles)
-            ]
-    if limit is not None:
-        try:
-            lim = int(limit)
-            if lim > 0:
-                data = data[:lim]
-        except Exception:
-            pass
-    if names_only:
-        data = [{"name": item.get("name"), "value": item.get("value")} for item in data]
-    return {"data": data, "next_token": container.get("next_token")}
+# Field-thinning helpers removed in lean API; return upstream payloads verbatim
 
 
 def mcp_response_ok(req_id: Any, result: Any) -> Json:
@@ -276,549 +250,86 @@ def mcp_response_error(req_id: Any, code: int, message: str, data: Any = None) -
 
 
 def build_tools_list() -> dict[str, Any]:
-    """Declare available tools with comprehensive schemas for MCP tools/list (2025 spec)."""
-    return {
-        "tools": [
-            {
-                "name": "search_deals",
-                "title": "Search Deals (name/address)",
-                "description": "Case-insensitive contains search across deal name and address fields. Returns {deals:{data:[...],next_token}} only; no metrics.",
-                "inputSchema": {
-                    "type": "object",
-                    "required": ["query"],
-                    "properties": {
-                        "query": {
-                            "type": "string",
-                            "description": "Free-text query matched against name and address",
-                            "minLength": 1,
-                            "maxLength": 200,
-                        },
-                        "updated_after": {
-                            "type": "string",
-                            "format": "date-time",
-                            "description": "Optional ISO 8601 filter on last_updated",
-                        },
-                        "limit": {
-                            "type": "integer",
-                            "minimum": 1,
-                            "maximum": 200,
-                            "default": 50,
-                        },
-                    },
-                    "additionalProperties": False,
-                },
-            },
+    """Build tools from OpenAPI spec; fall back to a minimal static list.
+
+    Only includes lean pass-through endpoints plus get_file_by_id (composite).
+    """
+    try:
+        # Build tools for all GET operations from OpenAPI
+        ops = load_get_operations()
+        tools = []
+        # Keep compatibility aliases for test-expected names
+        alias_map = {
+            "get_deal": "/deal/{deal_id}",  # prefer snake alias for getDealById
+        }
+        for op in ops:
+            input_schema = _jsonschema_from_params(op.get("parameters") or [])
+            name = op["name"]
+            # Add alias tool names if applicable
+            if op["path"] == "/deal/{deal_id}":
+                tools.append(
+                    {
+                        "name": "get_deal",
+                        "title": op["title"],
+                        "description": op["description"],
+                        "inputSchema": input_schema,
+                    }
+                )
+            tools.append(
+                {
+                    "name": name,
+                    "title": op["title"],
+                    "description": op["description"],
+                    "inputSchema": input_schema,
+                }
+            )
+    except Exception:
+        tools = [
             {
                 "name": "get_deals",
                 "title": "List Deals",
-                "description": "Retrieve deals from Dealpath with optional filters for status and property type. Includes local propertyType filtering when API-side filtering is unavailable. Returns paginated results with deal metadata.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "status": {
-                            "type": "string",
-                            "description": "Filter by deal status",
-                            "enum": ["Active", "Closed", "Potential", "Terminated"],
-                        },
-                        "propertyType": {
-                            "type": "string",
-                            "description": "Filter by property type",
-                            "enum": [
-                                "Office",
-                                "Retail",
-                                "Industrial",
-                                "Multifamily",
-                                "Hotel",
-                                "Mixed Use",
-                                "Other",
-                            ],
-                        },
-                        "limit": {
-                            "type": "integer",
-                            "description": "Maximum number of deals to return",
-                            "minimum": 1,
-                            "maximum": 100,
-                            "default": 20,
-                        },
-                        "next_token": {
-                            "type": "string",
-                            "description": "Pagination token from previous response to fetch next page",
-                        },
-                    },
-                    "additionalProperties": False,
-                },
-            },
-            {
-                "name": "describe_schema",
-                "title": "Describe Schema",
-                "description": "Return field definitions normalized to {field_definitions:{data:[...],next_token}} for safer planning.",
+                "description": "Proxy for GET /deals",
                 "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
             },
             {
                 "name": "get_deal",
-                "title": "Get Deal Details",
-                "description": "Returns a single deal in a nested object: {deal: {data: <deal>, next_token: null}}. Use the ID from get_deals.",
+                "title": "Get Deal",
+                "description": "Proxy for GET /deal/{deal_id}",
                 "inputSchema": {
                     "type": "object",
                     "required": ["deal_id"],
-                    "properties": {
-                        "deal_id": {
-                            "type": "string",
-                            "description": "Unique identifier for the deal",
-                            "pattern": "^[0-9]+$",
-                        }
-                    },
-                    "additionalProperties": False,
-                },
-            },
-            {
-                "name": "get_fields_by_deal_id",
-                "title": "Get Fields For Deal",
-                "description": "Returns {fields:{data:[{name:string, value:any, field_definition_id:number, derived_field_id:number, edit_value?:any, html_value?:string}], next_token?:string|null}} for a deal. Filters: non_null (drop null/empty), names_only ({name,value} only), name_contains (array of substrings, case-insensitive), limit (applied after filters). Paginate via next_token; no auto-pagination.",
-                "inputSchema": {
-                    "type": "object",
-                    "required": ["deal_id"],
-                    "properties": {
-                        "deal_id": {
-                            "type": "string",
-                            "description": "Deal ID",
-                            "pattern": "^[0-9]+$",
-                        },
-                        "next_token": {
-                            "type": "string",
-                            "description": "Pagination token from previous response to fetch next page",
-                        },
-                        
-                        "non_null": {
-                            "type": "boolean",
-                            "description": "Only include fields with non-null values",
-                            "default": False,
-                        },
-                        "limit": {
-                            "type": "integer",
-                            "description": "Limit number of items returned (applied after filters)",
-                            "minimum": 1,
-                            "maximum": 1000,
-                        },
-                        "names_only": {
-                            "type": "boolean",
-                            "description": "Return compact items as {name,value} only",
-                            "default": False,
-                        },
-                        "name_contains": {
-                            "type": "array",
-                            "description": "Only include items where name contains any of these substrings (case-insensitive)",
-                            "items": {"type": "string", "minLength": 1},
-                        },
-                    },
-                    "additionalProperties": False,
-                },
-            },
-            {
-                "name": "get_fields_by_investment_id",
-                "title": "Get Fields For Investment",
-                "description": "Returns {fields:{data:[{name:string, value:any, field_definition_id:number, derived_field_id:number, edit_value?:any, html_value?:string}], next_token?:string|null}} for an investment. Same filters and pagination as get_fields_by_deal_id.",
-                "inputSchema": {
-                    "type": "object",
-                    "required": ["investment_id"],
-                    "properties": {
-                        "investment_id": {
-                            "type": "string",
-                            "description": "Investment ID",
-                            "pattern": "^[0-9]+$",
-                        },
-                        "next_token": {
-                            "type": "string",
-                            "description": "Pagination token from previous response to fetch next page",
-                        },
-                        
-                        "non_null": {"type": "boolean", "default": False},
-                        "limit": {"type": "integer", "minimum": 1, "maximum": 1000},
-                        "names_only": {"type": "boolean", "default": False},
-                        "name_contains": {"type": "array", "items": {"type": "string", "minLength": 1}},
-                    },
-                    "additionalProperties": False,
-                },
-            },
-            {
-                "name": "get_fields_by_property_id",
-                "title": "Get Fields For Property",
-                "description": "Returns {fields:{data:[{name:string, value:any, field_definition_id:number, derived_field_id:number, edit_value?:any, html_value?:string}], next_token?:string|null}} for a property. Filters/pagination identical to get_fields_by_deal_id.",
-                "inputSchema": {
-                    "type": "object",
-                    "required": ["property_id"],
-                    "properties": {
-                        "property_id": {
-                            "type": "string",
-                            "description": "Property ID",
-                            "pattern": "^[0-9]+$",
-                        },
-                        "next_token": {
-                            "type": "string",
-                            "description": "Pagination token from previous response to fetch next page",
-                        },
-                        
-                        "non_null": {"type": "boolean", "default": False},
-                        "limit": {"type": "integer", "minimum": 1, "maximum": 1000},
-                        "names_only": {"type": "boolean", "default": False},
-                        "name_contains": {"type": "array", "items": {"type": "string", "minLength": 1}},
-                    },
-                    "additionalProperties": False,
-                },
-            },
-            {
-                "name": "get_fields_by_asset_id",
-                "title": "Get Fields For Asset",
-                "description": "Returns {fields:{data:[{name:string, value:any, field_definition_id:number, derived_field_id:number, edit_value?:any, html_value?:string}], next_token?:string|null}} for an asset. Filters/pagination identical to get_fields_by_deal_id.",
-                "inputSchema": {
-                    "type": "object",
-                    "required": ["asset_id"],
-                    "properties": {
-                        "asset_id": {
-                            "type": "string",
-                            "description": "Asset ID",
-                            "pattern": "^[0-9]+$",
-                        },
-                        "next_token": {
-                            "type": "string",
-                            "description": "Pagination token from previous response to fetch next page",
-                        },
-                        
-                        "non_null": {"type": "boolean", "default": False},
-                        "limit": {"type": "integer", "minimum": 1, "maximum": 1000},
-                        "names_only": {"type": "boolean", "default": False},
-                        "name_contains": {"type": "array", "items": {"type": "string", "minLength": 1}},
-                    },
-                    "additionalProperties": False,
-                },
-            },
-            {
-                "name": "get_fields_by_loan_id",
-                "title": "Get Fields For Loan",
-                "description": "Returns {fields:{data:[{name:string, value:any, field_definition_id:number, derived_field_id:number, edit_value?:any, html_value?:string}], next_token?:string|null}} for a loan. Filters/pagination identical to get_fields_by_deal_id.",
-                "inputSchema": {
-                    "type": "object",
-                    "required": ["loan_id"],
-                    "properties": {
-                        "loan_id": {
-                            "type": "string",
-                            "description": "Loan ID",
-                            "pattern": "^[0-9]+$",
-                        },
-                        "next_token": {
-                            "type": "string",
-                            "description": "Pagination token from previous response to fetch next page",
-                        },
-                        
-                        "non_null": {"type": "boolean", "default": False},
-                        "limit": {"type": "integer", "minimum": 1, "maximum": 1000},
-                        "names_only": {"type": "boolean", "default": False},
-                        "name_contains": {"type": "array", "items": {"type": "string", "minLength": 1}},
-                    },
-                    "additionalProperties": False,
-                },
-            },
-            {
-                "name": "get_fields_by_field_definition_id",
-                "title": "Get Fields For Field Definition",
-                "description": "Returns {fields:{data:[{name:string, value:any, field_definition_id:number, derived_field_id:number, edit_value?:any, html_value?:string}], next_token?:string|null}} for a field definition across records. Filters/pagination identical to get_fields_by_deal_id.",
-                "inputSchema": {
-                    "type": "object",
-                    "required": ["field_definition_id"],
-                    "properties": {
-                        "field_definition_id": {
-                            "type": "string",
-                            "description": "Field Definition ID",
-                            "pattern": "^[0-9]+$",
-                        },
-                        "next_token": {
-                            "type": "string",
-                            "description": "Pagination token from previous response to fetch next page",
-                        },
-                        
-                        "non_null": {"type": "boolean", "default": False},
-                        "limit": {"type": "integer", "minimum": 1, "maximum": 1000},
-                        "names_only": {"type": "boolean", "default": False},
-                        "name_contains": {"type": "array", "items": {"type": "string", "minLength": 1}},
-                    },
-                    "additionalProperties": False,
-                },
-            },
-            {
-                "name": "get_file_tag_definitions",
-                "title": "List File Tag Definitions",
-                "description": "Returns a paginated list of file tag definitions: {file_tag_definitions:{data:[...],next_token}}. Page via next_token. Example: {name:'get_file_tag_definitions'}",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "next_token": {
-                            "type": "string",
-                            "description": "Pagination token to fetch next page",
-                        },
-                        
-                    },
-                    "additionalProperties": False,
-                },
-            },
-            {
-                "name": "get_investments",
-                "title": "List Investments",
-                "description": "Returns a paginated list of investments: {investments:{data:[...],next_token}}. Page via next_token. Example: {name:'get_investments'}",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "next_token": {
-                            "type": "string",
-                            "description": "Pagination token to fetch next page",
-                        },
-                        
-                    },
-                    "additionalProperties": False,
-                },
-            },
-            {
-                "name": "get_loans",
-                "title": "List Loans",
-                "description": "Returns a paginated list of loans: {loans:{data:[...],next_token}}. Page via next_token. Example: {name:'get_loans'}",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "next_token": {
-                            "type": "string",
-                            "description": "Pagination token to fetch next page",
-                        },
-                        
-                    },
-                    "additionalProperties": False,
-                },
-            },
-            {
-                "name": "get_people",
-                "title": "List People",
-                "description": "Returns a paginated list of people: {people:{data:[...],next_token}}. Page via next_token. Example: {name:'get_people'}",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "next_token": {
-                            "type": "string",
-                            "description": "Pagination token to fetch next page",
-                        },
-                        
-                    },
-                    "additionalProperties": False,
-                },
-            },
-            {
-                "name": "get_list_options_by_field_definition_id",
-                "title": "List Options For Field Definition",
-                "description": "Get all options for a list field definition. Useful to look up IDs (e.g., Deal Type IDs) for create requests.",
-                "inputSchema": {
-                    "type": "object",
-                    "required": ["field_definition_id"],
-                    "properties": {
-                        "field_definition_id": {
-                            "type": "string",
-                            "description": "Field Definition ID",
-                            "pattern": "^[0-9]+$",
-                        }
-                    },
-                    "additionalProperties": False,
-                },
-            },
-            {
-                "name": "get_deal_files",
-                "title": "List Deal Files",
-                "description": "Retrieve files associated with a deal, with optional filtering by folder and tags.",
-                "inputSchema": {
-                    "type": "object",
-                    "required": ["deal_id"],
-                    "properties": {
-                        "deal_id": {
-                            "type": "integer",
-                            "description": "Unique identifier for the deal",
-                            "minimum": 1,
-                        },
-                        "parent_folder_ids": {
-                            "type": "array",
-                            "description": "Filter files by parent folder IDs",
-                            "items": {"type": "integer", "minimum": 1},
-                        },
-                        "file_tag_definition_ids": {
-                            "type": "array",
-                            "description": "Filter files by tag definition IDs",
-                            "items": {"type": "integer", "minimum": 1},
-                        },
-                        "updated_before": {
-                            "type": "integer",
-                            "description": "Unix timestamp - only return files updated before this time",
-                        },
-                        "updated_after": {
-                            "type": "integer",
-                            "description": "Unix timestamp - only return files updated after this time",
-                        },
-                        "next_token": {
-                            "type": "string",
-                            "description": "Pagination token for retrieving next page of results",
-                        },
-                    },
-                    "additionalProperties": False,
-                },
-            },
-            {
-                "name": "get_portfolio_summary",
-                "title": "Portfolio Summary",
-                "description": "Generate a summary of recent portfolio activity, including deal counts by status and property type for the last 2 weeks.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "days": {
-                            "type": "integer",
-                            "description": "Number of days to look back for activity",
-                            "minimum": 1,
-                            "maximum": 365,
-                            "default": 14,
-                        }
-                    },
-                    "additionalProperties": False,
-                },
-            },
-            {
-                "name": "search",
-                "title": "Global Search",
-                "description": "Perform a global search across all Dealpath entities including deals, properties, contacts, and documents.",
-                "inputSchema": {
-                    "type": "object",
-                    "required": ["query"],
-                    "properties": {
-                        "query": {
-                            "type": "string",
-                            "description": "Search query string",
-                            "minLength": 1,
-                            "maxLength": 500,
-                        },
-                        "entity_type": {
-                            "type": "string",
-                            "description": "Limit search to specific entity types",
-                            "enum": [
-                                "deals",
-                                "properties",
-                                "contacts",
-                                "documents",
-                                "all",
-                            ],
-                        },
-                    },
-                    "additionalProperties": False,
-                },
-            },
-            {
-                "name": "get_file_by_id",
-                "title": "Download File",
-                "description": "Download a file by ID and make it available through both remote signed URL and local server endpoint. Returns resource links for file access.",
-                "inputSchema": {
-                    "type": "object",
-                    "required": ["file_id"],
-                    "properties": {
-                        "file_id": {
-                            "type": "string",
-                            "description": "Unique identifier for the file",
-                            "pattern": "^[0-9]+$",
-                        },
-                        "download_locally": {
-                            "type": "boolean",
-                            "description": "Whether to download file to local server storage",
-                            "default": True,
-                        },
-                    },
-                    "additionalProperties": False,
-                },
-            },
-            {
-                "name": "executive_portfolio_overview",
-                "title": "📊 Executive Portfolio Overview",
-                "description": "Generate comprehensive C-suite portfolio analytics including deal counts, property type breakdown, geographic distribution, and key performance indicators.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "days_back": {
-                            "type": "integer",
-                            "description": "Number of days to analyze for trends",
-                            "minimum": 30,
-                            "maximum": 365,
-                            "default": 90,
-                        }
-                    },
-                    "additionalProperties": False,
-                },
-            },
-            {
-                "name": "deal_velocity_analysis",
-                "title": "🚀 Deal Velocity & Pipeline Analysis",
-                "description": "Analyze deal flow velocity, conversion rates, pipeline health, and forecasting metrics for strategic planning.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "lookback_months": {
-                            "type": "integer",
-                            "description": "Number of months to analyze for velocity trends",
-                            "minimum": 3,
-                            "maximum": 24,
-                            "default": 6,
-                        }
-                    },
-                    "additionalProperties": False,
-                },
-            },
-            {
-                "name": "market_performance_insights",
-                "title": "📈 Market Performance & Trends",
-                "description": "Generate market intelligence including property type performance, geographic hotspots, competitive landscape analysis, and market health indicators.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "property_types": {
-                            "type": "array",
-                            "description": "Filter analysis to specific property types",
-                            "items": {
-                                "type": "string",
-                                "enum": [
-                                    "Office",
-                                    "Retail",
-                                    "Industrial",
-                                    "Multifamily",
-                                    "Hotel",
-                                    "Mixed Use",
-                                    "Other",
-                                ],
-                            },
-                        },
-                        "include_competitive_analysis": {
-                            "type": "boolean",
-                            "description": "Include competitive landscape insights",
-                            "default": True,
-                        },
-                    },
-                    "additionalProperties": False,
-                },
-            },
-            {
-                "name": "risk_exposure_analysis",
-                "title": "⚠️ Risk Assessment & Exposure Analysis",
-                "description": "Comprehensive risk analysis including concentration risk, geographic exposure, liquidity analysis, and portfolio risk scoring with strategic recommendations.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "include_recommendations": {
-                            "type": "boolean",
-                            "description": "Include strategic risk mitigation recommendations",
-                            "default": True,
-                        }
-                    },
+                    "properties": {"deal_id": {"type": "string", "description": "Deal ID"}},
                     "additionalProperties": False,
                 },
             },
         ]
-    }
+    # Always include composite get_file_by_id tool
+    tools.append(
+        {
+            "name": "get_file_by_id",
+            "title": "Download File",
+            "description": "Download a file by ID via signed URL or proxy; returns resource links.",
+            "inputSchema": {
+                "type": "object",
+                "required": ["file_id"],
+                "properties": {
+                    "file_id": {"type": "string", "description": "File ID"},
+                    "download_locally": {"type": "boolean", "default": True},
+                },
+                "additionalProperties": False,
+            },
+        }
+    )
+    # Keep describe_schema which normalizes field definitions envelope
+    tools.append(
+        {
+            "name": "describe_schema",
+            "title": "Describe Schema",
+            "description": "Return field definitions normalized to {field_definitions:{data,next_token}}.",
+            "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+        }
+    )
+    return {"tools": tools}
 
 
 def _sanitize_filename(name: str) -> str:
@@ -867,6 +378,94 @@ def _absolute_local_url(base_url: str, relpath: str) -> str:
     return f"{base}/local-files/{rel}"
 
 
+# --- Tool Registry (incremental refactor) ---------------------------------
+
+@dataclass(frozen=True)
+class ToolHandler:
+    name: str
+    execute: Callable[[dict[str, Any], DealpathClient, Optional[str]], Any]
+    title: Optional[str] = None
+    description: Optional[str] = None
+    input_schema: Optional[dict[str, Any]] = None
+
+
+TOOL_REGISTRY: dict[str, ToolHandler] = {}
+
+
+def register_tool(handler: ToolHandler) -> None:
+    TOOL_REGISTRY[handler.name] = handler
+
+
+# Legacy search_deals executor removed; use upstream 'search' tool instead
+
+
+def _exec_get_deals(args: dict[str, Any], upstream: DealpathClient, base_url: Optional[str]) -> Any:
+    status_val = args.get("status")
+    property_type = args.get("propertyType")
+    next_token = args.get("next_token")
+    limit = args.get("limit")
+    filters: dict[str, Any] = {}
+    if status_val:
+        filters["status"] = status_val
+    if next_token:
+        filters["next_token"] = next_token
+    if limit is not None:
+        filters["limit"] = limit
+
+    result = upstream.get_deals(**filters)
+
+    # Local property type filter to match prior behavior
+    if property_type:
+        try:
+            deals_container = result.get("deals") or {}
+            data = deals_container.get("data") or []
+            filtered = [d for d in data if str(d.get("deal_type")) == str(property_type)]
+            deals_container = dict(deals_container)
+            deals_container["data"] = filtered
+            result = dict(result)
+            result["deals"] = deals_container
+        except Exception:
+            pass
+    return result
+
+
+def _exec_get_deal(args: dict[str, Any], upstream: DealpathClient, base_url: Optional[str]) -> Any:
+    deal_id = args.get("deal_id")
+    if not deal_id:
+        raise HTTPException(status_code=400, detail="deal_id is required")
+    try:
+        return upstream.get_deal_by_id(deal_id)
+    except requests.HTTPError as http_err:
+        resp = http_err.response
+        detail = {
+            "url": str(getattr(resp, "url", "")),
+            "status": getattr(resp, "status_code", 0),
+            "reason": getattr(resp, "reason", ""),
+            "body": resp.text[:500] if getattr(resp, "text", None) else None,
+        }
+        raise HTTPException(status_code=resp.status_code, detail=detail)
+
+
+# Register a first batch of tools via the registry
+# Note: Deliberately omit legacy 'search_deals' (dropped in lean API)
+register_tool(
+    ToolHandler(
+        name="get_deals",
+        execute=_exec_get_deals,
+        title="List Deals",
+        description="Retrieve deals with optional status filter and local propertyType filter.",
+    )
+)
+register_tool(
+    ToolHandler(
+        name="get_deal",
+        execute=_exec_get_deal,
+        title="Get Deal Details",
+        description="Return a single deal by ID.",
+    )
+)
+
+
 def tool_call_dispatch(
     name: str, arguments: dict[str, Any], *, base_url: Optional[str] = None, dp: Optional[DealpathClient] = None
 ) -> Any:
@@ -876,14 +475,43 @@ def tool_call_dispatch(
             status_code=400,
             detail="Dealpath API key required. Provide X-Dealpath-Key header or initialize with dealpath_key.",
         )
-    if name == "search_deals":
-        query = (arguments.get("query") or "").strip()
-        if not query:
-            raise HTTPException(status_code=400, detail="query is required")
-        updated_after = arguments.get("updated_after")
-        limit = arguments.get("limit") or 50
-        result = _search_deals_impl(query=query, updated_after=updated_after, limit=limit, dp=dp)
-        return result
+    # First, try the registry-based handlers to avoid the large conditional chain
+    handler = TOOL_REGISTRY.get(name)
+    if handler is not None:
+        return handler.execute(arguments, upstream, base_url)
+    # Generic GET proxy via OpenAPI when possible
+    try:
+        ops = load_get_operations()
+        # Map by name for quick lookup
+        op_map = {op["name"]: op for op in ops}
+        # Compatibility alias for get_deal
+        for op in ops:
+            if op["path"] == "/deal/{deal_id}":
+                op_map.setdefault("get_deal", op)
+        op = op_map.get(name)
+        if op:
+            # Build URL: substitute path params from arguments; remaining args → query
+            path = op["path"]
+            params_meta = op.get("parameters") or []
+            path_param_names = {p.get("name") for p in params_meta if p.get("in") == "path"}
+            url_path = path
+            for p in path_param_names:
+                token = "{" + p + "}"
+                if token in url_path:
+                    val = arguments.get(p)
+                    if val is None:
+                        raise HTTPException(status_code=400, detail=f"Missing path parameter: {p}")
+                    url_path = url_path.replace(token, str(val))
+            query = {k: v for k, v in arguments.items() if k not in path_param_names and v is not None}
+            # Use DealpathClient.session directly
+            from .dealpath_client import BASE_URL as DP_BASE
+            url = f"{DP_BASE}{url_path}"
+            resp = upstream.session.get(url, params=query, timeout=30)
+            resp.raise_for_status()
+            return resp.json()
+    except Exception:
+        pass
+    # legacy 'search_deals' removed in lean API
 
     if name == "get_deals":
         status_val = arguments.get("status")
@@ -943,17 +571,7 @@ def tool_call_dispatch(
         params = {}
         if arguments.get("next_token"):
             params["next_token"] = arguments["next_token"]
-        page = upstream.get_fields_by_deal_id(deal_id, **params)
-        if any(k in arguments for k in ("non_null", "limit", "names_only", "name_contains")):
-            thinned = _thin_fields_container(
-                page.get("fields", {}),
-                non_null=bool(arguments.get("non_null")),
-                limit=arguments.get("limit"),
-                names_only=bool(arguments.get("names_only")),
-                name_contains=arguments.get("name_contains"),
-            )
-            return {"fields": thinned}
-        return page
+        return upstream.get_fields_by_deal_id(deal_id, **params)
 
     if name == "describe_schema":
         # Normalize to {field_definitions: {data, next_token}}
@@ -970,17 +588,7 @@ def tool_call_dispatch(
         params = {}
         if arguments.get("next_token"):
             params["next_token"] = arguments["next_token"]
-        page = upstream.get_fields_by_investment_id(investment_id, **params)
-        if any(k in arguments for k in ("non_null", "limit", "names_only", "name_contains")):
-            thinned = _thin_fields_container(
-                page.get("fields", {}),
-                non_null=bool(arguments.get("non_null")),
-                limit=arguments.get("limit"),
-                names_only=bool(arguments.get("names_only")),
-                name_contains=arguments.get("name_contains"),
-            )
-            return {"fields": thinned}
-        return page
+        return upstream.get_fields_by_investment_id(investment_id, **params)
 
     if name == "get_fields_by_property_id":
         property_id = arguments.get("property_id")
@@ -989,17 +597,7 @@ def tool_call_dispatch(
         params = {}
         if arguments.get("next_token"):
             params["next_token"] = arguments["next_token"]
-        page = upstream.get_fields_by_property_id(property_id, **params)
-        if any(k in arguments for k in ("non_null", "limit", "names_only", "name_contains")):
-            thinned = _thin_fields_container(
-                page.get("fields", {}),
-                non_null=bool(arguments.get("non_null")),
-                limit=arguments.get("limit"),
-                names_only=bool(arguments.get("names_only")),
-                name_contains=arguments.get("name_contains"),
-            )
-            return {"fields": thinned}
-        return page
+        return upstream.get_fields_by_property_id(property_id, **params)
 
     if name == "get_fields_by_asset_id":
         asset_id = arguments.get("asset_id")
@@ -1008,17 +606,7 @@ def tool_call_dispatch(
         params = {}
         if arguments.get("next_token"):
             params["next_token"] = arguments["next_token"]
-        page = upstream.get_fields_by_asset_id(asset_id, **params)
-        if any(k in arguments for k in ("non_null", "limit", "names_only", "name_contains")):
-            thinned = _thin_fields_container(
-                page.get("fields", {}),
-                non_null=bool(arguments.get("non_null")),
-                limit=arguments.get("limit"),
-                names_only=bool(arguments.get("names_only")),
-                name_contains=arguments.get("name_contains"),
-            )
-            return {"fields": thinned}
-        return page
+        return upstream.get_fields_by_asset_id(asset_id, **params)
 
     if name == "get_fields_by_loan_id":
         loan_id = arguments.get("loan_id")
@@ -1027,17 +615,7 @@ def tool_call_dispatch(
         params = {}
         if arguments.get("next_token"):
             params["next_token"] = arguments["next_token"]
-        page = upstream.get_fields_by_loan_id(loan_id, **params)
-        if any(k in arguments for k in ("non_null", "limit", "names_only", "name_contains")):
-            thinned = _thin_fields_container(
-                page.get("fields", {}),
-                non_null=bool(arguments.get("non_null")),
-                limit=arguments.get("limit"),
-                names_only=bool(arguments.get("names_only")),
-                name_contains=arguments.get("name_contains"),
-            )
-            return {"fields": thinned}
-        return page
+        return upstream.get_fields_by_loan_id(loan_id, **params)
 
     if name == "get_fields_by_field_definition_id":
         field_definition_id = arguments.get("field_definition_id")
@@ -1048,17 +626,7 @@ def tool_call_dispatch(
         params = {}
         if arguments.get("next_token"):
             params["next_token"] = arguments["next_token"]
-        page = upstream.get_fields_by_field_definition_id(field_definition_id, **params)
-        if any(k in arguments for k in ("non_null", "limit", "names_only", "name_contains")):
-            thinned = _thin_fields_container(
-                page.get("fields", {}),
-                non_null=bool(arguments.get("non_null")),
-                limit=arguments.get("limit"),
-                names_only=bool(arguments.get("names_only")),
-                name_contains=arguments.get("name_contains"),
-            )
-            return {"fields": thinned}
-        return page
+        return upstream.get_fields_by_field_definition_id(field_definition_id, **params)
 
     if name == "get_file_tag_definitions":
         params = {}
@@ -1099,29 +667,7 @@ def tool_call_dispatch(
         }
         return upstream.get_deal_files_by_id(deal_id, **params)
 
-    if name == "get_portfolio_summary":
-        response = upstream.get_deals()
-        deal_list = response.get("deals", {}).get("data", [])
-        two_weeks_ago = datetime.utcnow() - timedelta(weeks=2)
-        recent_deals: list[dict[str, Any]] = []
-        for deal in deal_list:
-            last_updated_str = deal.get("last_updated")
-            if last_updated_str:
-                dt = datetime.fromisoformat(last_updated_str.replace("Z", ""))
-                if dt > two_weeks_ago:
-                    recent_deals.append(deal)
-
-        if not recent_deals:
-            return {"totalDeals": 0, "dealsByStatus": {}, "dealsByPropertyType": {}}
-
-        total_deals = len(recent_deals)
-        status_counts = Counter(d.get("deal_state") for d in recent_deals)
-        property_type_counts = Counter(d.get("deal_type") for d in recent_deals)
-        return {
-            "totalDeals": total_deals,
-            "dealsByStatus": dict(status_counts),
-            "dealsByPropertyType": dict(property_type_counts),
-        }
+    # portfolio summary removed in lean API
 
     if name == "search":
         query = arguments.get("query")
@@ -1134,155 +680,29 @@ def tool_call_dispatch(
         if not file_id:
             raise HTTPException(status_code=400, detail="file_id is required")
         parts: list[dict[str, Any]] = []
-
-        # Prefer signed URL; include remote link and also save locally
+        # Download via files.dealpath.com with Authorization and store locally only
         try:
-            info = upstream.get_file_download_url(file_id)
-            url = info.get("url")
-            filename = info.get("filename") or str(file_id)
-            if url:
-                try:
-                    r = requests.get(url, stream=True)
-                    r.raise_for_status()
-                    rel = _store_stream_locally(file_id, filename, r)
-                    local_uri = _absolute_local_url(
-                        base_url or "http://127.0.0.1:8000", rel
-                    )
-                    # Build a summary text part to ensure both links are visible in UIs
-                    summary = (
-                        f"Links for file '{filename}' (id {file_id}):\n"
-                        f"- Local: {local_uri}\n"
-                        f"- Remote (expires): {url}"
-                    )
-                    parts.append({"type": "text", "text": summary})
-                    # Add local first, remote last (some clients display only the last part)
-                    parts.append(
-                        {"type": "resource_link", "name": filename, "uri": local_uri}
-                    )
-                    parts.append(
-                        {"type": "resource_link", "name": filename, "uri": url}
-                    )
-                    return {"__content__": parts}
-                except Exception:
-                    # If local save fails (e.g., no network or no disk access), still
-                    # provide a stable local-style link alongside the remote link so
-                    # clients can present both. We won't persist bytes in this path.
-                    rel = _build_local_relpath(file_id, filename)
-                    local_uri = _absolute_local_url(
-                        base_url or "http://127.0.0.1:8000", rel
-                    )
-                    summary = (
-                        f"Links for file '{filename}' (id {file_id}):\n"
-                        f"- Local (not persisted): {local_uri}\n"
-                        f"- Remote (expires): {url}"
-                    )
-                    parts.append({"type": "text", "text": summary})
-                    parts.append(
-                        {"type": "resource_link", "name": filename, "uri": local_uri}
-                    )
-                    parts.append(
-                        {"type": "resource_link", "name": filename, "uri": url}
-                    )
-                    return {"__content__": parts}
-        except Exception:
-            # proceed to direct download fallback
-            pass
-
-        # Fallback: download via files.dealpath.com with Authorization and store locally only
-        try:
-            data = client.download_file_content(file_id)
+            data = upstream.download_file_content(file_id)
             filename = data.get("filename", str(file_id))
             rel = _store_bytes_locally(file_id, filename, data["content"])
             local_uri = _absolute_local_url(base_url or "http://127.0.0.1:8000", rel)
-            summary = (
-                f"Links for file '{filename}' (id {file_id}):\n" f"- Local: {local_uri}"
-            )
+            summary = f"File saved locally: {filename}\n- Local: {local_uri}"
             parts.append({"type": "text", "text": summary})
             parts.append({"type": "resource_link", "name": filename, "uri": local_uri})
             return {"__content__": parts}
         except requests.HTTPError as http_err:
             resp = http_err.response
-            raise HTTPException(
-                status_code=resp.status_code, detail=f"Dealpath error: {resp.text}"
-            )
+            raise HTTPException(status_code=resp.status_code, detail=f"Dealpath error: {resp.text}")
         except Exception as e:
             raise HTTPException(status_code=502, detail=f"Failed to fetch file: {e}")
 
     # Executive Analytics Tools
-    if name == "executive_portfolio_overview":
-        days_back = arguments.get("days_back", 90)
-        return upstream.get_executive_portfolio_overview(days_back=days_back)
-
-    if name == "deal_velocity_analysis":
-        lookback_months = arguments.get("lookback_months", 6)
-        return upstream.get_deal_velocity_analysis(lookback_months=lookback_months)
-
-    if name == "market_performance_insights":
-        property_types = arguments.get("property_types")
-        return upstream.get_market_performance_insights(property_types=property_types)
-
-    if name == "risk_exposure_analysis":
-        return upstream.get_risk_exposure_analysis()
+    # executive analytics removed in lean API
 
     raise HTTPException(status_code=404, detail=f"Unknown tool: {name}")
 
 
-def _search_deals_impl(
-    *, query: str, updated_after: Optional[str] = None, limit: int = 50, dp: Optional[DealpathClient] = None
-) -> dict[str, Any]:
-    """Local search across deals: name/address contains query.
-
-    This avoids returning metrics and keeps scope to deals only.
-    """
-    # Fetch a wider window then filter locally; clamp to 1000
-    upstream = dp or client
-    if upstream is None:
-        raise HTTPException(
-            status_code=400,
-            detail="Dealpath API key required. Provide X-Dealpath-Key header or initialize with dealpath_key.",
-        )
-    try:
-        deals_envelope = upstream.get_deals(limit=1000)
-    except Exception as e:
-        # Surface errors consistently
-        raise HTTPException(status_code=502, detail=f"Failed to fetch deals: {e}")
-
-    deals = deals_envelope.get("deals", {}).get("data", [])
-
-    q = query.lower()
-
-    def text(v: Any) -> str:
-        return str(v or "").lower()
-
-    def addr_str(d: dict[str, Any]) -> str:
-        a = d.get("address") or {}
-        parts = [a.get("line1"), a.get("city"), a.get("state"), a.get("country")]
-        return " ".join([str(p) for p in parts if p])
-
-    filtered: list[dict[str, Any]] = []
-    cutoff = None
-    if updated_after:
-        try:
-            cutoff = datetime.fromisoformat(updated_after.replace("Z", ""))
-        except Exception:
-            cutoff = None
-
-    for d in deals:
-        name = text(d.get("name") or d.get("title"))
-        address = text(addr_str(d))
-        if q in name or q in address:
-            if cutoff is not None:
-                lu = d.get("last_updated") or d.get("updated_at")
-                try:
-                    if lu and datetime.fromisoformat(str(lu).replace("Z", "")) <= cutoff:
-                        continue
-                except Exception:
-                    pass
-            filtered.append(d)
-        if len(filtered) >= limit:
-            break
-
-    return {"deals": {"data": filtered, "next_token": None}}
+# _search_deals_impl removed (use upstream 'search')
 
 
 def to_content_parts(value: Any) -> list[dict[str, Any]]:
@@ -1320,19 +740,13 @@ def build_resource_templates() -> list[dict[str, Any]]:
             "mimeType": "text/markdown",
             "description": "Compact markdown summary of a deal",
         },
-        {
-            "name": "Search Deals JSON",
-            "uriTemplate": "dealpath://search/{query}.json",
-            "mimeType": "application/json",
-            "description": "Search deals by name/address and return JSON list",
-        },
     ]
 
 
 def _parse_dealpath_uri(uri: str) -> Tuple[str, str]:
     """Parse a dealpath:// URI and return (kind, value).
 
-    kind: 'deal_json' | 'deal_md' | 'search_json'
+    kind: 'deal_json' | 'deal_md'
     value: id or query
     """
     if not uri.startswith("dealpath://"):
@@ -1342,8 +756,6 @@ def _parse_dealpath_uri(uri: str) -> Tuple[str, str]:
         return ("deal_json", body[len("deal/") : -len(".json")])
     if body.startswith("deal/") and body.endswith(".md"):
         return ("deal_md", body[len("deal/") : -len(".md")])
-    if body.startswith("search/") and body.endswith(".json"):
-        return ("search_json", body[len("search/") : -len(".json")])
     raise HTTPException(status_code=404, detail="Resource not found")
 
 
@@ -1564,22 +976,7 @@ async def mcp_http_endpoint(
                             ]
                         },
                     )
-                if kind == "search_json":
-                    query = requests.utils.unquote(value)
-                    result = _search_deals_impl(query=query, limit=50)
-                    text = json.dumps(result, ensure_ascii=False, separators=(",", ":"))
-                    return mcp_response_ok(
-                        req_id,
-                        {
-                            "contents": [
-                                {
-                                    "uri": uri,
-                                    "mimeType": "application/json",
-                                    "text": text,
-                                }
-                            ]
-                        },
-                    )
+                # no other resource kinds supported in lean mode
 
             if method in ("prompts/list", "prompts.list"):
                 return mcp_response_ok(
@@ -1599,11 +996,7 @@ async def mcp_http_endpoint(
                                 "description": "Summarize deals grouped by stage/market/owner.",
                                 "inputSchema": {"type": "object", "properties": {}},
                             },
-                            {
-                                "name": "inspect_fields",
-                                "description": "Safely explore custom fields using filters (non_null, names_only, name_contains, limit) and pagination.",
-                                "inputSchema": {"type": "object", "properties": {}},
-                            },
+                            # lean mode: omit advanced field-thinning guidance
                         ]
                     },
                 )
@@ -1654,35 +1047,7 @@ async def mcp_http_endpoint(
                             ]
                         },
                     )
-                if name == "inspect_fields":
-                    return mcp_response_ok(
-                        req_id,
-                        {
-                            "messages": [
-                                {
-                                    "role": "system",
-                                    "content": [
-                                        {
-                                            "type": "text",
-                                            "text": (
-                                                "To explore custom fields without overwhelming the model, always start scoped: "
-                                                "Use get_fields_by_deal_id (or *_by_property_id / *_by_asset_id / *_by_loan_id) with filters.\n"
-                                                "- Set non_null:true to drop empty values.\n"
-                                                "- Use names_only:true for compact {name,value}.\n"
-                                                "- Use name_contains:[\"risk\",\"milestone\",\"debt\"] to target relevant fields (case-insensitive).\n"
-                                                "- Set limit (e.g., 25) and then page with next_token if needed.\n\n"
-                                                "Examples (tools/call):\n"
-                                                "- {name: get_fields_by_deal_id, arguments: {deal_id: \"<ID>\", non_null: true, names_only: true, limit: 25}}\n"
-                                                "- {name: get_fields_by_deal_id, arguments: {deal_id: \"<ID>\", name_contains: [\"risk\", \"covenant\"], non_null: true, names_only: true, limit: 20}}\n"
-                                                "- {name: get_fields_by_deal_id, arguments: {deal_id: \"<ID>\", next_token: \"<from previous page>\", names_only: true, limit: 25}}\n\n"
-                                                "Warning: get_fields_by_* may include long text, HTML snippets (html_value), and linked IDs; avoid requesting everything at once."
-                                            ),
-                                        }
-                                    ],
-                                }
-                            ]
-                        },
-                    )
+                # lean mode: omit 'inspect_fields' prompt
                 return mcp_response_error(req_id, 404, f"Unknown prompt: {name}")
 
             if method == "ping":
@@ -1741,6 +1106,31 @@ async def mcp_http_ping():
         "message": "Dealpath MCP HTTP endpoint",
         "protocolVersion": SUPPORTED_PROTOCOL_VERSION,
     }
+
+
+# --- OAuth stubs for remote transports that probe OAuth flows --------------
+
+@app.get("/oauth/authorize")
+async def oauth_authorize_stub():
+    # We do not support OAuth; return a well-formed OAuth error body
+    return JSONResponse(
+        status_code=400,
+        content={
+            "error": "unsupported_response_type",
+            "error_description": "This server does not implement OAuth authorization. Use direct headers.",
+        },
+    )
+
+
+@app.post("/oauth/token")
+async def oauth_token_stub():
+    return JSONResponse(
+        status_code=400,
+        content={
+            "error": "unsupported_grant_type",
+            "error_description": "This server does not implement OAuth token exchange.",
+        },
+    )
 
 
 @app.get("/local-files/{date}/{file_id}/{filename}")
@@ -1847,50 +1237,7 @@ def get_deal_files_by_id_endpoint(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/mcp/getPortfolioSummary")
-def get_portfolio_summary_endpoint():
-    """
-    Provides a summary of the deal portfolio, including total deals and counts by status and property type for deals updated in the last two weeks.
-
-    Returns:
-        A JSON object with portfolio summary.
-    """
-    try:
-        response = client.get_deals()
-        deal_list = response.get("deals", {}).get("data", [])
-
-        # Filter for deals updated in the last two weeks
-        two_weeks_ago = datetime.utcnow() - timedelta(weeks=2)
-        recent_deals = []
-        for deal in deal_list:
-            last_updated_str = deal.get("last_updated")
-            if last_updated_str:
-                # Parse the date, assuming UTC (Z suffix)
-                last_updated_date = datetime.fromisoformat(
-                    last_updated_str.replace("Z", "")
-                )
-                if last_updated_date > two_weeks_ago:
-                    recent_deals.append(deal)
-
-        deal_list = recent_deals  # Continue with the filtered list
-
-        if not deal_list:
-            return {"totalDeals": 0, "dealsByStatus": {}, "dealsByPropertyType": {}}
-
-        total_deals = len(deal_list)
-
-        # Use 'deal_state' for status and 'deal_type' for property type
-        status_counts = Counter(d.get("deal_state") for d in deal_list)
-        property_type_counts = Counter(d.get("deal_type") for d in deal_list)
-
-        return {
-            "totalDeals": total_deals,
-            "dealsByStatus": dict(status_counts),
-            "dealsByPropertyType": dict(property_type_counts),
-        }
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+## Removed: /mcp/getPortfolioSummary (not part of lean API)
 
 
 @app.get("/mcp/getAssets")
@@ -2388,27 +1735,14 @@ def get_roles_by_asset_id_endpoint(
 @app.get("/mcp/search")
 def search_endpoint(
     query: str,
-    updated_after: Optional[str] = Query(None, description="ISO 8601 timestamp filter"),
-    limit: int = Query(50, ge=1, le=200, description="Max results to return (<=200)"),
     x_dealpath_key: Optional[str] = Header(None, alias="X-Dealpath-Key"),
 ):
-    """
-    Performs a global search across the Dealpath environment.
-
-    Args:
-        query: The search term.
-
-    Returns:
-        A JSON object containing the search results.
-    """
+    """Proxy to Dealpath global search (lean mode)."""
     try:
-        # Align with MCP search tool: local search across deals only
-        dp_client = DealpathClient(api_key=x_dealpath_key) if x_dealpath_key else None
-        return _search_deals_impl(query=query, updated_after=updated_after, limit=limit, dp=dp_client)
+        dp_client = DealpathClient(api_key=x_dealpath_key) if x_dealpath_key else client
+        return dp_client.search(query=query)
     except Exception as e:
-        raise HTTPException(
-            status_code=500, detail={"code": "search_failed", "message": str(e)}
-        )
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # --- Health Check and Monitoring Endpoints (2025 standards) ---
